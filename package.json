@@ -1,0 +1,12 @@
+{
+  "name": "rwp-backend",
+  "version": "1.0.0",
+  "dependencies": {
+    "razorpay": "^2.9.2",
+    "pdf-lib": "^1.17.1",
+    "googleapis": "^140.0.0",
+    "resend": "^3.2.0",
+    "formidable": "^3.5.1",
+    "sharp": "^0.33.4"
+  }
+}
