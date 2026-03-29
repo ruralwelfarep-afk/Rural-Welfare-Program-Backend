@@ -319,28 +319,67 @@ export default async function handler(req, res) {
     }
 
     // 7. Generate PDF
+    // const pdfBytes = await generateApplicationPDF(
+    //   formData,
+    //   razorpay_payment_id,
+    //   {
+    //     photo:            photoFile,
+    //     signature:        sigFile,
+    //     aadharDoc:        aadharFile,
+    //     tenthDoc:         tenthFile,
+    //     twelfthDoc:       twelfthFile,
+    //     graduationDoc:    graduationFile,
+    //     qualificationDoc: qualFile,
+    //     additionalDoc:    addFile,
+    //   }
+    // )
+
+    // // 8. Upload to Google Drive
+    // const safeName  = name.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 30)
+    // const filename  = `Application_${safeName}_${registrationNo}.pdf`
+    // const driveLink = await uploadToDrive(pdfBytes, filename)
+
+    // // 9. Send emails
+    // await sendEmails(formData, pdfBytes, driveLink, razorpay_payment_id, registrationNo)
+
+    // 🚀 FAST RESPONSE FIRST (IMPORTANT)
+res.status(200).json({
+  success: true,
+  message: "Payment verified successfully",
+  registrationNo,
+})
+
+// 🧠 BACKGROUND PROCESS (no await)
+;(async () => {
+  try {
     const pdfBytes = await generateApplicationPDF(
       formData,
       razorpay_payment_id,
       {
-        photo:            photoFile,
-        signature:        sigFile,
-        aadharDoc:        aadharFile,
-        tenthDoc:         tenthFile,
-        twelfthDoc:       twelfthFile,
-        graduationDoc:    graduationFile,
+        photo: photoFile,
+        signature: sigFile,
+        aadharDoc: aadharFile,
+        tenthDoc: tenthFile,
+        twelfthDoc: twelfthFile,
+        graduationDoc: graduationFile,
         qualificationDoc: qualFile,
-        additionalDoc:    addFile,
+        additionalDoc: addFile,
       }
     )
 
-    // 8. Upload to Google Drive
-    const safeName  = name.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 30)
-    const filename  = `Application_${safeName}_${registrationNo}.pdf`
+    const safeName = name.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 30)
+    const filename = `Application_${safeName}_${registrationNo}.pdf`
+
     const driveLink = await uploadToDrive(pdfBytes, filename)
 
-    // 9. Send emails
     await sendEmails(formData, pdfBytes, driveLink, razorpay_payment_id, registrationNo)
+
+    console.log("✅ Background process complete")
+
+  } catch (err) {
+    console.error("❌ Background error:", err)
+  }
+})()
 
     // 10. Return PDF to frontend
     return res.status(200).json({
