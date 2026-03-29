@@ -1,6 +1,7 @@
 {
   "name": "rwp-backend",
   "version": "1.0.0",
+  "type": "module",
   "dependencies": {
     "razorpay": "^2.9.2",
     "pdf-lib": "^1.17.1",
