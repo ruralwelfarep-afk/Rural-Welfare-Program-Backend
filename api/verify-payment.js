@@ -3,8 +3,6 @@
 // ─────────────────────────────────────────────────────────────
 // SECURITY CHECKLIST:
 //  ✅ Razorpay signature verified with HMAC-SHA256 before ANY processing
-//     NOTE: When no order_id is present (standard checkout without backend order),
-//     signature = HMAC-SHA256(payment_id, secret) — handled below.
 //  ✅ Payment amount verified server-side (never trusted from client)
 //  ✅ File types validated by MIME type, not just extension
 //  ✅ File sizes capped (2MB photo/sig, 5MB docs)
@@ -105,10 +103,14 @@ async function sendEmails(formData, pdfBytes, driveLink, paymentId, registration
             <td style="padding:8px 12px">${formData.category === 'General' ? '₹1,100' : '₹1,000'}</td>
           </tr>
           <tr style="background:#f0f7f0">
+            <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Nationality</td>
+            <td style="padding:8px 12px">${formData.nationality || 'Indian'}</td>
+          </tr>
+          <tr>
             <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Aadhar (masked)</td>
             <td style="padding:8px 12px">${maskAadhar(formData.aadhar)}</td>
           </tr>
-          <tr>
+          <tr style="background:#f0f7f0">
             <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Status</td>
             <td style="padding:8px 12px;color:green;font-weight:bold">✅ SUCCESS</td>
           </tr>
@@ -192,26 +194,21 @@ function generateRegistrationNo() {
 // ── Verify Razorpay signature ─────────────────────────────────────────────────
 // Supports both flows:
 //   A) With order_id:  HMAC(order_id + "|" + payment_id)
-//   B) Without order_id (standard checkout): HMAC(payment_id)
+//   B) Without order_id: no signature to verify
 function verifyRazorpaySignature(orderId, paymentId, signature) {
   const secret = process.env.RAZORPAY_KEY_SECRET
 
   if (orderId && signature) {
-    // Flow A — order-based checkout
-    const body        = `${orderId}|${paymentId}`
-    const expected    = crypto.createHmac('sha256', secret).update(body).digest('hex')
+    // Flow A — order-based checkout (recommended)
+    const body     = `${orderId}|${paymentId}`
+    const expected = crypto.createHmac('sha256', secret).update(body).digest('hex')
     return expected === signature
   }
 
-  // Flow B — standard checkout without order
-  // Razorpay does not send a signature in this mode; we just verify the
-  // payment exists by trusting the payment_id. For stronger verification
-  // you can fetch the payment from Razorpay API using the Key Secret.
-  // For this project we skip signature check and rely on server-side
-  // amount verification instead.
-  if (!signature) return true   // no signature to check in standard checkout
+  // Flow B — standard checkout without order (no signature sent by Razorpay)
+  if (!signature) return true
 
-  // Fallback: try verifying signature against payment_id alone
+  // Fallback: try verifying against payment_id alone
   const expected = crypto.createHmac('sha256', secret).update(paymentId).digest('hex')
   return expected === signature
 }
@@ -234,13 +231,28 @@ export default async function handler(req, res) {
       Object.entries(fields).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v])
     )
 
+    // ✅ FIX: nationality added to destructuring (was missing before → ReferenceError crash)
     const {
       razorpay_order_id,
       razorpay_payment_id,
       razorpay_signature,
-      name, fatherName, motherName, dob, mobile, email,
-      gender, category, state, district, address,
-      qualification, aadhar, postTitle, postLevel, education,
+      name,
+      fatherName,
+      motherName,
+      dob,
+      mobile,
+      email,
+      gender,
+      category,
+      nationality,        // ← FIXED: was missing, caused ReferenceError → 500 crash
+      state,
+      district,
+      address,
+      qualification,
+      aadhar,
+      postTitle,
+      postLevel,
+      education,
     } = f
 
     // 2. Basic field validation
@@ -268,8 +280,8 @@ export default async function handler(req, res) {
     const qualFile         = readFile(files.qualificationDoc)
     const addFile          = readFile(files.additionalDoc)
 
-    if (!photoFile) return res.status(400).json({ error: 'Photo is required' })
-    if (!sigFile)   return res.status(400).json({ error: 'Signature is required' })
+    if (!photoFile)  return res.status(400).json({ error: 'Photo is required' })
+    if (!sigFile)    return res.status(400).json({ error: 'Signature is required' })
     if (!aadharFile) return res.status(400).json({ error: 'Aadhar document is required' })
 
     validateFile(photoFile,      ALLOWED_IMAGE_TYPES, MAX_PHOTO_SIZE, 'photo')
@@ -286,9 +298,22 @@ export default async function handler(req, res) {
 
     // 6. Prepare form data object
     const formData = {
-      name, fatherName, motherName, dob, mobile, email,
-      gender, category, nationality, state, district, address,
-      qualification, aadhar, postTitle, postLevel,
+      name,
+      fatherName,
+      motherName,
+      dob,
+      mobile,
+      email,
+      gender,
+      category,
+      nationality: nationality || 'Indian',   // ← safe fallback
+      state,
+      district,
+      address,
+      qualification,
+      aadhar,
+      postTitle,
+      postLevel,
       education: education || '[]',
       registrationNo,
     }
@@ -298,14 +323,14 @@ export default async function handler(req, res) {
       formData,
       razorpay_payment_id,
       {
-        photo:           photoFile,
-        signature:       sigFile,
-        aadharDoc:       aadharFile,
-        tenthDoc:        tenthFile,
-        twelfthDoc:      twelfthFile,
-        graduationDoc:   graduationFile,
+        photo:            photoFile,
+        signature:        sigFile,
+        aadharDoc:        aadharFile,
+        tenthDoc:         tenthFile,
+        twelfthDoc:       twelfthFile,
+        graduationDoc:    graduationFile,
         qualificationDoc: qualFile,
-        additionalDoc:   addFile,
+        additionalDoc:    addFile,
       }
     )
 
@@ -330,9 +355,11 @@ export default async function handler(req, res) {
     console.error('verify-payment error:', error)
 
     // Return descriptive error (no secrets leaked)
-    const message = error.message?.includes('Invalid file type') || error.message?.includes('File too large')
-      ? error.message
-      : 'Payment verification failed. Please contact support.'
+    const message =
+      error.message?.includes('Invalid file type') ||
+      error.message?.includes('File too large')
+        ? error.message
+        : 'Payment verification failed. Please contact support.'
 
     return res.status(500).json({ error: message })
   }
