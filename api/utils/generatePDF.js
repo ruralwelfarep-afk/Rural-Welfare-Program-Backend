@@ -875,11 +875,11 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
       ? [['Sender Name',   formData.senderName]] : []),
     ...(payMethod === 'UPI' && formData.senderUpiId
       ? [['Sender UPI ID', formData.senderUpiId]] : []),
-    ...(payMethod === 'Bank Transfer' && formData.accountHolderName
-      ? [
-          ['Account Holder',   formData.accountHolderName],
-          ['Account (Last 4)', formData.lastFourDigits ? `XXXX-${formData.lastFourDigits}` : '—'],
-        ] : []),
+    // ...(payMethod === 'Bank Transfer' && formData.accountHolderName
+    //   ? [
+    //       ['Account Holder',   formData.accountHolderName],
+    //       ['Account (Last 4)', formData.lastFourDigits ? `XXXX-${formData.lastFourDigits}` : '—'],
+    //     ] : []),
     ['Amount',              amountStr],
     ['Payment Date / Time', payDateTimeStr],
     ['Payment Status',      'Under Review'],
