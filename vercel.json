@@ -3,6 +3,9 @@
     "api/verify-payment.js": {
       "maxDuration": 60,
       "memory": 1024
+    },
+    "api/create-order.js": {
+      "maxDuration": 10
     }
   },
   "routes": [
