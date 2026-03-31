@@ -448,7 +448,7 @@
 
 
 
-// api/utils/generatePDF.js
+// backend/api/utils/generatePDF.js
 // CHANGES FROM ORIGINAL:
 //  ✅ Payment Status section updated — shows paymentMethod, UTR, status
 //  ✅ All layout constants and visual design UNCHANGED

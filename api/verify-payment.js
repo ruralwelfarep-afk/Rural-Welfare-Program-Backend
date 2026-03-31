@@ -446,28 +446,22 @@
 
 
 
-
 // api/verify-payment.js
-// Vercel Serverless Function (JSON body — no multipart needed anymore)
-// ─────────────────────────────────────────────────────────────
-// CHANGES FROM ORIGINAL:
-//  ✅ Razorpay signature verification REMOVED
-//  ✅ Accepts JSON body: { pdfBase64, formData, paymentInfo, registrationNo }
-//  ✅ Uploads PDF to Google Drive
-//  ✅ Sends email to user + admin (PDF attached)
-//  ✅ Returns { success, driveLink, registrationNo }
-//  ✅ Graceful degradation — Drive/email fail nahi rokta response
-// ─────────────────────────────────────────────────────────────
+// CHANGES:
+//  ✅ Ab JSON mein uploadedFiles (base64) aata hai
+//  ✅ Backend khud generateApplicationPDF call karta hai
+//  ✅ pdfBase64 response mein wapas bhejta hai (SuccessPage download ke liye)
+//  ✅ Drive upload + Email — same as before
 
-import { google } from 'googleapis'
-import { Resend }  from 'resend'
-import { Readable } from 'stream'
+import { google }              from 'googleapis'
+import { Resend }              from 'resend'
+import { Readable }            from 'stream'
+import { generateApplicationPDF } from './utils/generatePDF.js'
 
-// ── Vercel config ─────────────────────────────────────────────────────────────
 export const config = {
   api: {
     bodyParser: {
-      sizeLimit: '25mb',    // PDF base64 ke liye enough
+      sizeLimit: '25mb',
     },
     responseLimit: '10mb',
   },
@@ -491,7 +485,7 @@ function getDriveClient() {
   return google.drive({ version: 'v3', auth })
 }
 
-// ── Upload PDF to Google Drive ────────────────────────────────────────────────
+// ── Upload to Drive ───────────────────────────────────────────────────────────
 async function uploadToDrive(pdfBuffer, filename) {
   const drive  = getDriveClient()
   const stream = new Readable()
@@ -507,7 +501,6 @@ async function uploadToDrive(pdfBuffer, filename) {
     media:  { mimeType: 'application/pdf', body: stream },
     fields: 'id, webViewLink',
   })
-
   return response.data.webViewLink
 }
 
@@ -516,11 +509,21 @@ function maskAadhar(aadhar) {
   return aadhar ? 'XXXX-XXXX-' + String(aadhar).slice(-4) : '—'
 }
 
-// ── Send emails (user + admin) ────────────────────────────────────────────────
-async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink, registrationNo) {
+// ── base64 string → Buffer (PDF ke liye) ─────────────────────────────────────
+function base64ToFileObj(fileObj) {
+  if (!fileObj?.base64) return null
+  return {
+    buffer:       Buffer.from(fileObj.base64, 'base64'),
+    mimetype:     fileObj.mimetype     || 'image/jpeg',
+    originalName: fileObj.originalName || 'file',
+    size:         Buffer.from(fileObj.base64, 'base64').length,
+  }
+}
 
+// ── Send Emails ───────────────────────────────────────────────────────────────
+async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink, registrationNo) {
   const amountDisplay = formData.category === 'General' ? '₹1,100' : '₹1,000'
-  const utr           = paymentInfo.utrNumber || paymentInfo.transactionId || '—'
+  const utr           = paymentInfo.utrNumber || '—'
   const payMethod     = paymentInfo.paymentMethod || 'Manual'
 
   const htmlBody = `
@@ -531,10 +534,10 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
       </div>
       <div style="padding:24px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 12px 12px">
         <p>Dear <strong>${formData.name}</strong>,</p>
-        <p>Your application for <strong>${formData.postTitle}</strong> has been successfully submitted.</p>
+        <p>Your application for <strong>${formData.postTitle}</strong> has been submitted successfully.</p>
         <p style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:12px;font-size:13px">
           ⏳ <strong>Payment Status: Pending Verification</strong><br/>
-          Your payment will be verified within 24 hours. You will be notified once confirmed.
+          Your payment will be verified within 24 hours.
         </p>
         <table style="width:100%;border-collapse:collapse;font-size:14px;margin:16px 0">
           <tr style="background:#f0f7f0">
@@ -558,20 +561,16 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
             <td style="padding:8px 12px">${amountDisplay}</td>
           </tr>
           <tr>
-            <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Nationality</td>
-            <td style="padding:8px 12px">${formData.nationality || 'Indian'}</td>
-          </tr>
-          <tr style="background:#f0f7f0">
             <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Aadhar (masked)</td>
             <td style="padding:8px 12px">${maskAadhar(formData.aadhar)}</td>
           </tr>
-          <tr>
+          <tr style="background:#f0f7f0">
             <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Status</td>
             <td style="padding:8px 12px;color:#856404;font-weight:bold">⏳ Pending Verification</td>
           </tr>
         </table>
         <p>
-          Your complete application PDF is attached to this email.<br/>
+          Your application PDF is attached to this email.<br/>
           ${driveLink ? `<a href="${driveLink}" style="color:#1a5c2a;font-weight:bold">View on Google Drive →</a>` : ''}
         </p>
         <p style="color:#888;font-size:12px;margin-top:24px">
@@ -581,7 +580,7 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
     </div>
   `
 
-  // ── Email to applicant (masked aadhar) ──
+  // User ko email
   await resend.emails.send({
     from:    `Rural Welfare Program <${process.env.FROM_EMAIL}>`,
     to:      formData.email,
@@ -590,15 +589,13 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
     attachments: [{ filename, content: pdfBase64 }],
   })
 
-  // ── Email to admin (real aadhar) ──
+  // Admin ko email
   const adminHtml = htmlBody
     .replace(maskAadhar(formData.aadhar), String(formData.aadhar))
-    .replace('⏳ Pending Verification', `⏳ Pending Verification — UTR: ${utr}`)
-
   await resend.emails.send({
     from:    `Rural Welfare Program <${process.env.FROM_EMAIL}>`,
     to:      process.env.ADMIN_EMAIL,
-    subject: `[NEW APPLICATION] ${formData.name} — ${formData.postTitle} — ${registrationNo} — UTR: ${utr}`,
+    subject: `[NEW] ${formData.name} — ${formData.postTitle} — ${registrationNo} — UTR: ${utr}`,
     html:    adminHtml,
     attachments: [{ filename, content: pdfBase64 }],
   })
@@ -607,7 +604,6 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
 // ── MAIN HANDLER ──────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
 
-  // ── CORS ──
   const allowedOrigin = process.env.ALLOWED_ORIGIN || '*'
   res.setHeader('Access-Control-Allow-Origin',  allowedOrigin)
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
@@ -615,25 +611,14 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST')   return res.status(405).json({ error: 'Method not allowed' })
 
-  console.log('[verify-payment] New request received')
+  console.log('[verify-payment] Request received')
 
   try {
-    // ── Step 1: Parse JSON body ──
-    const body = req.body   // Vercel bodyParser handles this (enabled in config)
+    const { registrationNo, paymentId, formData, paymentInfo, uploadedFiles } = req.body
 
-    const {
-      pdfBase64,        // string — base64 encoded PDF (generated in browser)
-      formData,         // object — all personal + post details
-      paymentInfo,      // object — paymentMethod, utrNumber, senderUpiId, etc.
-      registrationNo,   // string — generated in frontend
-    } = body
-
-    // ── Step 2: Validate required fields ──
-    if (!pdfBase64) {
-      return res.status(400).json({ error: 'Missing PDF data' })
-    }
+    // ── Validate ──
     if (!formData?.name || !formData?.email) {
-      return res.status(400).json({ error: 'Missing required form fields (name/email)' })
+      return res.status(400).json({ error: 'Missing required fields (name/email)' })
     }
     if (!registrationNo) {
       return res.status(400).json({ error: 'Missing registration number' })
@@ -641,12 +626,40 @@ export default async function handler(req, res) {
 
     console.log('[verify-payment] Fields OK | name:', formData.name, '| reg:', registrationNo)
 
-    // ── Step 3: Prepare PDF buffer ──
-    const pdfBuffer  = Buffer.from(pdfBase64, 'base64')
-    const safeName   = (formData.name || 'applicant').replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 30)
-    const filename   = `Application_${safeName}_${registrationNo}.pdf`
+    // ── Files ko buffer mein convert karo ──
+    const filesForPDF = {
+      photo:           base64ToFileObj(uploadedFiles?.photo),
+      signature:       base64ToFileObj(uploadedFiles?.signature),
+      aadharDoc:       base64ToFileObj(uploadedFiles?.aadharDoc),
+      tenthDoc:        base64ToFileObj(uploadedFiles?.tenthDoc),
+      twelfthDoc:      base64ToFileObj(uploadedFiles?.twelfthDoc),
+      graduationDoc:   base64ToFileObj(uploadedFiles?.graduationDoc),
+      qualificationDoc:base64ToFileObj(uploadedFiles?.qualificationDoc),
+      additionalDoc:   base64ToFileObj(uploadedFiles?.additionalDoc),
+    }
 
-    // ── Step 4: Upload to Google Drive (non-blocking) ──
+    // ── PDF generate karo ──
+    console.log('[verify-payment] Generating PDF...')
+    const pdfFormData = {
+      ...formData,
+      registrationNo,
+      paymentMethod:     paymentInfo?.paymentMethod     || 'Manual',
+      utrNumber:         paymentInfo?.utrNumber         || '—',
+      senderUpiId:       paymentInfo?.senderUpiId       || '',
+      accountHolderName: paymentInfo?.accountHolderName || '',
+      lastFourDigits:    paymentInfo?.lastFourDigits    || '',
+      paymentStatus:     paymentInfo?.paymentStatus     || 'Pending Verification',
+    }
+
+    const pdfBytes  = await generateApplicationPDF(pdfFormData, paymentId, filesForPDF)
+    const pdfBuffer = Buffer.from(pdfBytes)
+    const pdfBase64 = pdfBuffer.toString('base64')
+
+    const safeName = (formData.name || 'applicant').replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 30)
+    const filename = `Application_${safeName}_${registrationNo}.pdf`
+    console.log('[verify-payment] PDF generated ✅')
+
+    // ── Drive upload ──
     let driveLink = null
     try {
       driveLink = await uploadToDrive(pdfBuffer, filename)
@@ -655,7 +668,7 @@ export default async function handler(req, res) {
       console.error('[verify-payment] Drive upload FAILED (non-fatal):', err.message)
     }
 
-    // ── Step 5: Send emails (non-blocking) ──
+    // ── Emails bhejo ──
     try {
       await sendEmails(formData, paymentInfo || {}, pdfBase64, filename, driveLink, registrationNo)
       console.log('[verify-payment] Emails sent ✅')
@@ -663,12 +676,11 @@ export default async function handler(req, res) {
       console.error('[verify-payment] Email FAILED (non-fatal):', err.message)
     }
 
-    // ── Step 6: Return success ──
-    console.log('[verify-payment] Done ✅ | registrationNo:', registrationNo)
-
+    // ── Response ──
     return res.status(200).json({
       success:        true,
       driveLink:      driveLink || null,
+      pdfBase64,        // ← SuccessPage pe download ke liye
       registrationNo,
       filename,
     })
@@ -676,7 +688,7 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error('[verify-payment] Unexpected error:', error)
     return res.status(500).json({
-      error: 'Server error. Please contact support with your Registration Number.',
+      error: 'Server error. Please try again.',
     })
   }
 }
