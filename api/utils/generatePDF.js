@@ -475,7 +475,8 @@ function getLogoPath() {
     if (!fileURLToPath || !dirname || !resolve) return null
     const __filename = fileURLToPath(import.meta.url)
     const __dir      = dirname(__filename)
-    return resolve(__dir, '../../public/logo.webp')
+    return resolve(__dirname, '../../public/logo.webp')
+     
   } catch (_) { return null }
 }
 

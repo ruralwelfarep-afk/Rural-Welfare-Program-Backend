@@ -442,66 +442,67 @@
 // }
 
 
-
-
-
-
 // api/verify-payment.js
-// CHANGES:
-//  ✅ Ab JSON mein uploadedFiles (base64) aata hai
-//  ✅ Backend khud generateApplicationPDF call karta hai
-//  ✅ pdfBase64 response mein wapas bhejta hai (SuccessPage download ke liye)
-//  ✅ Drive upload + Email — same as before
+// MANUAL PAYMENT VERSION — No Razorpay, No googleapis
+// ARCHITECTURE:
+//  ✅ Backend: PDF generate karo → Apps Script ko bhejo
+//  ✅ Apps Script: Sheet mein data daalo + PDF Drive pe upload karo
+//  ✅ Email: Resend se bhejo (PDF attached)
+//  ✅ No service account needed — Drive ka kaam Apps Script karta hai
 
-import { google }              from 'googleapis'
-import { Resend }              from 'resend'
-import { Readable }            from 'stream'
+import { Resend }                 from 'resend'
 import { generateApplicationPDF } from './utils/generatePDF.js'
 
 export const config = {
   api: {
-    bodyParser: {
-      sizeLimit: '25mb',
-    },
+    bodyParser:    { sizeLimit: '25mb' },
     responseLimit: '10mb',
   },
 }
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
-// ── Google Drive auth ─────────────────────────────────────────────────────────
-function getDriveClient() {
-  const auth = new google.auth.GoogleAuth({
-    credentials: {
-      type:           'service_account',
-      project_id:     process.env.GOOGLE_PROJECT_ID,
-      private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID,
-      private_key:    process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-      client_email:   process.env.GOOGLE_CLIENT_EMAIL,
-      client_id:      process.env.GOOGLE_CLIENT_ID,
-    },
-    scopes: ['https://www.googleapis.com/auth/drive.file'],
-  })
-  return google.drive({ version: 'v3', auth })
+// ── base64 → Buffer (PDF generation ke liye) ─────────────────────────────────
+function base64ToFileObj(fileObj) {
+  if (!fileObj?.base64) return null
+  try {
+    return {
+      buffer:       Buffer.from(fileObj.base64, 'base64'),
+      mimetype:     fileObj.mimetype     || 'image/jpeg',
+      originalName: fileObj.originalName || 'file',
+    }
+  } catch (e) {
+    console.warn('[base64ToFileObj] failed:', e.message)
+    return null
+  }
 }
 
-// ── Upload to Drive ───────────────────────────────────────────────────────────
-async function uploadToDrive(pdfBuffer, filename) {
-  const drive  = getDriveClient()
-  const stream = new Readable()
-  stream.push(pdfBuffer)
-  stream.push(null)
+// ── Apps Script ko call karo — sheet data + Drive PDF dono ───────────────────
+async function submitToAppsScript(payload) {
+  const url = process.env.APPS_SCRIPT_URL || process.env.VITE_APPS_SCRIPT_URL
+  if (!url) {
+    console.warn('[apps-script] URL not set in .env — skipping')
+    return { driveLink: null }
+  }
 
-  const response = await drive.files.create({
-    requestBody: {
-      name:    filename,
-      mimeType: 'application/pdf',
-      parents: [process.env.GOOGLE_DRIVE_FOLDER_ID],
-    },
-    media:  { mimeType: 'application/pdf', body: stream },
-    fields: 'id, webViewLink',
-  })
-  return response.data.webViewLink
+  try {
+    const res  = await fetch(url, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ action: 'submit', ...payload }),
+    })
+    const text = await res.text()
+    console.log('[apps-script] Response:', text)
+
+    const json = JSON.parse(text)
+    if (!json.success) {
+      console.error('[apps-script] Failed:', json.error)
+    }
+    return json
+  } catch (err) {
+    console.error('[apps-script] Error:', err.message)
+    return { driveLink: null }
+  }
 }
 
 // ── Mask Aadhar ───────────────────────────────────────────────────────────────
@@ -509,37 +510,29 @@ function maskAadhar(aadhar) {
   return aadhar ? 'XXXX-XXXX-' + String(aadhar).slice(-4) : '—'
 }
 
-// ── base64 string → Buffer (PDF ke liye) ─────────────────────────────────────
-function base64ToFileObj(fileObj) {
-  if (!fileObj?.base64) return null
-  return {
-    buffer:       Buffer.from(fileObj.base64, 'base64'),
-    mimetype:     fileObj.mimetype     || 'image/jpeg',
-    originalName: fileObj.originalName || 'file',
-    size:         Buffer.from(fileObj.base64, 'base64').length,
-  }
-}
-
-// ── Send Emails ───────────────────────────────────────────────────────────────
+// ── Resend se email bhejo ─────────────────────────────────────────────────────
 async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink, registrationNo) {
-  // const amountDisplay = formData.category === 'General' ? '₹1,100' : '₹1,000'
   const amountDisplay = formData.category === 'General' ? 'Rs. 1,100' : 'Rs. 1,000'
-  const utr           = paymentInfo.utrNumber || '—'
-  const payMethod     = paymentInfo.paymentMethod || 'Manual'
+  const utr           = paymentInfo?.utrNumber   || '—'
+  const payMethod     = paymentInfo?.paymentMethod || 'Manual'
+  const fromEmail     = process.env.FROM_EMAIL
+  const adminEmail    = process.env.ADMIN_EMAIL
+
+  if (!fromEmail) throw new Error('FROM_EMAIL not set in .env')
 
   const htmlBody = `
     <div style="font-family:sans-serif;max-width:600px;margin:auto">
       <div style="background:#1a5c2a;padding:24px;border-radius:12px 12px 0 0">
         <h2 style="color:white;margin:0">Rural Welfare Program</h2>
-        <p style="color:#f0c020;margin:4px 0 0">Application Confirmation</p>
+        <p style="color:#f0c020;margin:4px 0 0">Application Submitted Successfully</p>
       </div>
       <div style="padding:24px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 12px 12px">
         <p>Dear <strong>${formData.name}</strong>,</p>
-        <p>Your application for <strong>${formData.postTitle}</strong> has been submitted successfully.</p>
-        <p style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:12px;font-size:13px">
+        <p>Your application for <strong>${formData.postTitle}</strong> has been submitted.</p>
+        <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:12px;font-size:13px;margin:16px 0">
           ⏳ <strong>Payment Status: Pending Verification</strong><br/>
           Your payment will be verified within 24 hours.
-        </p>
+        </div>
         <table style="width:100%;border-collapse:collapse;font-size:14px;margin:16px 0">
           <tr style="background:#f0f7f0">
             <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a;width:45%">Registration No.</td>
@@ -571,8 +564,8 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
           </tr>
         </table>
         <p>
-          Your application PDF is attached to this email.<br/>
-          ${driveLink ? `<a href="${driveLink}" style="color:#1a5c2a;font-weight:bold">View on Google Drive →</a>` : ''}
+          Application PDF is attached to this email.<br/>
+          ${driveLink && driveLink !== '—' ? `<a href="${driveLink}" style="color:#1a5c2a;font-weight:bold">View on Google Drive →</a>` : ''}
         </p>
         <p style="color:#888;font-size:12px;margin-top:24px">
           Rural Welfare Program — Healthy Villages, Empowered Women, Prosperous India
@@ -581,30 +574,30 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
     </div>
   `
 
-  // User ko email
+  // Applicant ko
   await resend.emails.send({
-    from:    `Rural Welfare Program <${process.env.FROM_EMAIL}>`,
-    to:      formData.email,
-    subject: `Application Submitted — ${formData.postTitle} — Reg. No. ${registrationNo}`,
-    html:    htmlBody,
+    from:        `Rural Welfare Program <${fromEmail}>`,
+    to:          formData.email,
+    subject:     `Application Submitted — ${formData.postTitle} — Reg. ${registrationNo}`,
+    html:        htmlBody,
     attachments: [{ filename, content: pdfBase64 }],
   })
 
-  // Admin ko email
-  const adminHtml = htmlBody
-    .replace(maskAadhar(formData.aadhar), String(formData.aadhar))
-  await resend.emails.send({
-    from:    `Rural Welfare Program <${process.env.FROM_EMAIL}>`,
-    to:      process.env.ADMIN_EMAIL,
-    subject: `[NEW] ${formData.name} — ${formData.postTitle} — ${registrationNo} — UTR: ${utr}`,
-    html:    adminHtml,
-    attachments: [{ filename, content: pdfBase64 }],
-  })
+  // Admin ko
+  if (adminEmail) {
+    const adminHtml = htmlBody.replace(maskAadhar(formData.aadhar), String(formData.aadhar || ''))
+    await resend.emails.send({
+      from:        `Rural Welfare Program <${fromEmail}>`,
+      to:          adminEmail,
+      subject:     `[NEW] ${formData.name} — ${formData.postTitle} — ${registrationNo} — UTR: ${utr}`,
+      html:        adminHtml,
+      attachments: [{ filename, content: pdfBase64 }],
+    })
+  }
 }
 
 // ── MAIN HANDLER ──────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-
   const allowedOrigin = process.env.ALLOWED_ORIGIN || '*'
   res.setHeader('Access-Control-Allow-Origin',  allowedOrigin)
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
@@ -617,26 +610,29 @@ export default async function handler(req, res) {
   try {
     const { registrationNo, paymentId, formData, paymentInfo, uploadedFiles } = req.body
 
-    // ── Validate ──
+    // ── Validation ──
     if (!formData?.name || !formData?.email) {
-      return res.status(400).json({ error: 'Missing required fields (name/email)' })
+      return res.status(400).json({ error: 'Missing required fields: name aur email zaroori hain' })
     }
     if (!registrationNo) {
-      return res.status(400).json({ error: 'Missing registration number' })
+      return res.status(400).json({ error: 'Missing registrationNo' })
+    }
+    if (!paymentInfo?.utrNumber) {
+      return res.status(400).json({ error: 'Missing UTR / Transaction ID' })
     }
 
-    console.log('[verify-payment] Fields OK | name:', formData.name, '| reg:', registrationNo)
+    console.log('[verify-payment] Validated | name:', formData.name, '| reg:', registrationNo)
 
-    // ── Files ko buffer mein convert karo ──
+    // ── Files convert karo ──
     const filesForPDF = {
-      photo:           base64ToFileObj(uploadedFiles?.photo),
-      signature:       base64ToFileObj(uploadedFiles?.signature),
-      aadharDoc:       base64ToFileObj(uploadedFiles?.aadharDoc),
-      tenthDoc:        base64ToFileObj(uploadedFiles?.tenthDoc),
-      twelfthDoc:      base64ToFileObj(uploadedFiles?.twelfthDoc),
-      graduationDoc:   base64ToFileObj(uploadedFiles?.graduationDoc),
-      qualificationDoc:base64ToFileObj(uploadedFiles?.qualificationDoc),
-      additionalDoc:   base64ToFileObj(uploadedFiles?.additionalDoc),
+      photo:            base64ToFileObj(uploadedFiles?.photo),
+      signature:        base64ToFileObj(uploadedFiles?.signature),
+      aadharDoc:        base64ToFileObj(uploadedFiles?.aadharDoc),
+      tenthDoc:         base64ToFileObj(uploadedFiles?.tenthDoc),
+      twelfthDoc:       base64ToFileObj(uploadedFiles?.twelfthDoc),
+      graduationDoc:    base64ToFileObj(uploadedFiles?.graduationDoc),
+      qualificationDoc: base64ToFileObj(uploadedFiles?.qualificationDoc),
+      additionalDoc:    base64ToFileObj(uploadedFiles?.additionalDoc),
     }
 
     // ── PDF generate karo ──
@@ -646,30 +642,66 @@ export default async function handler(req, res) {
       registrationNo,
       paymentMethod:     paymentInfo?.paymentMethod     || 'Manual',
       utrNumber:         paymentInfo?.utrNumber         || '—',
+      senderName:        paymentInfo?.senderName        || '',
       senderUpiId:       paymentInfo?.senderUpiId       || '',
       accountHolderName: paymentInfo?.accountHolderName || '',
       lastFourDigits:    paymentInfo?.lastFourDigits    || '',
       paymentStatus:     paymentInfo?.paymentStatus     || 'Pending Verification',
     }
 
-    const pdfBytes  = await generateApplicationPDF(pdfFormData, paymentId, filesForPDF)
-    const pdfBuffer = Buffer.from(pdfBytes)
-    const pdfBase64 = pdfBuffer.toString('base64')
-
-    const safeName = (formData.name || 'applicant').replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 30)
-    const filename = `Application_${safeName}_${registrationNo}.pdf`
-    console.log('[verify-payment] PDF generated ✅')
-
-    // ── Drive upload ──
-    let driveLink = null
+    let pdfBytes
     try {
-      driveLink = await uploadToDrive(pdfBuffer, filename)
-      console.log('[verify-payment] Drive upload ✅ | link:', driveLink)
+      pdfBytes = await generateApplicationPDF(pdfFormData, paymentId, filesForPDF)
     } catch (err) {
-      console.error('[verify-payment] Drive upload FAILED (non-fatal):', err.message)
+      console.error('[verify-payment] PDF generation failed:', err)
+      return res.status(500).json({ error: 'PDF generation failed: ' + err.message })
     }
 
-    // ── Emails bhejo ──
+    const pdfBase64 = Buffer.from(pdfBytes).toString('base64')
+    const safeName  = (formData.name || 'applicant').replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 30)
+    const filename  = `Application_${safeName}_${registrationNo}.pdf`
+    console.log('[verify-payment] PDF generated ✅ | size:', pdfBytes.length, 'bytes')
+
+    // ── Apps Script ko bhejo — sheet + Drive upload dono wahan se hoga ──
+    let driveLink = null
+    try {
+      const scriptResult = await submitToAppsScript({
+        registrationNo,
+        paymentId,
+        name:              formData.name,
+        fatherName:        formData.fatherName        || '',
+        motherName:        formData.motherName        || '',
+        dob:               formData.dob               || '',
+        mobile:            formData.mobile            || '',
+        email:             formData.email,
+        gender:            formData.gender            || '',
+        category:          formData.category          || '',
+        nationality:       formData.nationality       || 'Indian',
+        state:             formData.state             || '',
+        district:          formData.district          || '',
+        address:           formData.address           || '',
+        qualification:     formData.qualification     || '',
+        aadhar:            formData.aadhar            || '',
+        postTitle:         formData.postTitle         || '',
+        postLevel:         formData.postLevel         || '',
+        paymentMethod:     paymentInfo?.paymentMethod || 'Manual',
+        transactionId:     paymentInfo?.utrNumber     || '',
+        senderName:        paymentInfo?.senderName        || '',
+        senderUpiId:       paymentInfo?.senderUpiId       || '',
+        accountHolderName: paymentInfo?.accountHolderName || '',
+        lastFourDigits:    paymentInfo?.lastFourDigits    || '',
+        education:         formData.education         || '[]',
+        screenshotBase64:  uploadedFiles?.screenshot?.base64 ? '[uploaded]' : '',
+        // ← PDF base64 Apps Script ko de rahe hain Drive upload ke liye
+        pdfBase64,
+      })
+      driveLink = scriptResult?.driveLink || null
+      console.log('[verify-payment] Apps Script ✅ | driveLink:', driveLink)
+    } catch (err) {
+      console.error('[verify-payment] Apps Script FAILED (non-fatal):', err.message)
+    }
+
+    // ── Email bhejo ──
     try {
       await sendEmails(formData, paymentInfo || {}, pdfBase64, filename, driveLink, registrationNo)
       console.log('[verify-payment] Emails sent ✅')
@@ -677,19 +709,17 @@ export default async function handler(req, res) {
       console.error('[verify-payment] Email FAILED (non-fatal):', err.message)
     }
 
-    // ── Response ──
+    // ── Success response ──
     return res.status(200).json({
-      success:        true,
-      driveLink:      driveLink || null,
-      pdfBase64,        // ← SuccessPage pe download ke liye
-      registrationNo,
+      success: true,
+      pdfBase64,
       filename,
+      driveLink:      driveLink || null,
+      registrationNo,
     })
 
   } catch (error) {
     console.error('[verify-payment] Unexpected error:', error)
-    return res.status(500).json({
-      error: 'Server error. Please try again.',
-    })
+    return res.status(500).json({ error: 'Server error. Please try again.' })
   }
 }
