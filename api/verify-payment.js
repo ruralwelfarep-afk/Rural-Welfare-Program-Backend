@@ -1,6 +1,7 @@
 // api/verify-payment.js
-// ✅ UPDATED: All new fields — Bank Details, Block, Pincode, Bank Passbook etc.
-// ✅ Email: Comment/uncomment the "sendEmails" block to enable/disable
+// ✅ FIXED: registrationNo ab backend mein generate hota hai — frontend se nahi aata
+// ✅ Apps Script handleSubmit se registrationNo return hota hai
+// ✅ req.body properly destructure kiya gaya hai
 
 import nodemailer                from 'nodemailer'
 import { generateApplicationPDF } from './utils/generatePDF.js'
@@ -41,11 +42,13 @@ function base64ToFileObj(fileObj) {
 }
 
 // ── Apps Script call ──────────────────────────────────────────────────────────
+// ✅ registrationNo Apps Script ke handleSubmit mein generate hoga
+// ✅ Response mein registrationNo aayega
 async function submitToAppsScript(payload) {
   const url = process.env.APPS_SCRIPT_URL || process.env.VITE_APPS_SCRIPT_URL
   if (!url) {
     console.warn('[apps-script] URL not set in .env — skipping')
-    return { driveLink: null }
+    return { success: false, driveLink: null, registrationNo: null }
   }
 
   try {
@@ -59,13 +62,13 @@ async function submitToAppsScript(payload) {
     console.log('[apps-script] Response:', text)
 
     let json
-    try { json = JSON.parse(text) } catch { return { driveLink: null } }
+    try { json = JSON.parse(text) } catch { return { driveLink: null, registrationNo: null } }
 
     if (!json.success) console.error('[apps-script] Failed:', json.error)
     return json
   } catch (err) {
     console.error('[apps-script] Error:', err.message)
-    return { driveLink: null }
+    return { driveLink: null, registrationNo: null }
   }
 }
 
@@ -74,10 +77,8 @@ function maskAadhar(aadhar) {
   return aadhar ? 'XXXX-XXXX-' + String(aadhar).slice(-4) : '—'
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // ── Send Emails via Brevo ─────────────────────────────────────────────────────
-// ── EMAIL BAND KARNA HO TO: is poore function ko call mat karo (neeche dekho) ─
-// ─────────────────────────────────────────────────────────────────────────────
+// EMAIL BAND KARNA HO TO: handler mein sendEmails call ko comment out karo
 async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink, registrationNo) {
   const fromEmail  = process.env.FROM_EMAIL
   const adminEmail = process.env.ADMIN_EMAIL
@@ -182,35 +183,23 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
     </div>
   `
 
-  // ── Applicant email ──
   await transporter.sendMail({
     from:        `"Rural Welfare Program" <${fromEmail}>`,
     to:          formData.email,
     subject:     `Application Submitted — ${formData.postTitle} — Reg. ${registrationNo}`,
     html:        htmlBody,
-    attachments: [{
-      filename,
-      content:     pdfBuffer,
-      contentType: 'application/pdf',
-    }],
+    attachments: [{ filename, content: pdfBuffer, contentType: 'application/pdf' }],
   })
   console.log('[email] Applicant email sent to:', formData.email)
 
-  // ── Admin email ──
   if (adminEmail) {
-    // Admin ko unmasked Aadhar dikhate hain
-    const adminHtml = htmlBody
-      .replace(maskAadhar(formData.aadhar), String(formData.aadhar || ''))
+    const adminHtml = htmlBody.replace(maskAadhar(formData.aadhar), String(formData.aadhar || ''))
     await transporter.sendMail({
       from:        `"Rural Welfare Program" <${fromEmail}>`,
       to:          adminEmail,
       subject:     `[NEW] ${formData.name} — ${formData.postTitle} — ${registrationNo} — UTR: ${utr}`,
       html:        adminHtml,
-      attachments: [{
-        filename,
-        content:     pdfBuffer,
-        contentType: 'application/pdf',
-      }],
+      attachments: [{ filename, content: pdfBuffer, contentType: 'application/pdf' }],
     })
     console.log('[email] Admin email sent to:', adminEmail)
   }
@@ -228,20 +217,18 @@ export default async function handler(req, res) {
   console.log('[verify-payment] Request received')
 
   try {
-    const { registrationNo, formData, paymentInfo, uploadedFiles } = req.body
+    // ✅ req.body properly destructure karo — registrationNo frontend se nahi aata
+    const { formData, paymentInfo, uploadedFiles } = req.body
 
     // ── Validation ──
     if (!formData?.name || !formData?.email) {
       return res.status(400).json({ error: 'Missing required fields: name aur email zaroori hain' })
     }
-    if (!registrationNo) {
-      return res.status(400).json({ error: 'Missing registrationNo' })
-    }
     if (!paymentInfo?.utrNumber) {
       return res.status(400).json({ error: 'Missing UTR / Transaction ID' })
     }
 
-    console.log('[verify-payment] Validated | name:', formData.name, '| reg:', registrationNo)
+    console.log('[verify-payment] Validated | name:', formData.name)
 
     // ── Files convert karo ──
     const filesForPDF = {
@@ -256,11 +243,60 @@ export default async function handler(req, res) {
       screenshot:       base64ToFileObj(uploadedFiles?.screenshot),
     }
 
-    // ── PDF generate karo ──
-    console.log('[verify-payment] Generating PDF...')
+    // ── Apps Script call — registrationNo wahan generate hoga ──
+    // PDF generate karne ke liye placeholder use karte hain pehle
+    // Phir real registrationNo se PDF regenerate karenge
+    console.log('[verify-payment] Calling Apps Script for registration no + sheet entry...')
 
+    const scriptResult = await submitToAppsScript({
+      // ✅ registrationNo nahi bhejte — Apps Script khud generate karega
+      name:              formData.name,
+      fatherName:        formData.fatherName        || '',
+      motherName:        formData.motherName        || '',
+      dob:               formData.dob               || '',
+      mobile:            formData.mobile            || '',
+      email:             formData.email,
+      gender:            formData.gender            || '',
+      category:          formData.category          || '',
+      nationality:       formData.nationality       || 'Indian',
+      qualification:     formData.qualification     || '',
+      aadhar:            formData.aadhar            || '',
+      state:             formData.state             || '',
+      district:          formData.district          || '',
+      block:             formData.block             || '',
+      pincode:           formData.pincode           || '',
+      address:           formData.address           || '',
+      bankAccountNo:     formData.bankAccountNo     || '',
+      bankIfsc:          formData.bankIfsc          || '',
+      bankName:          formData.bankName          || '',
+      postTitle:         formData.postTitle         || '',
+      postLevel:         formData.postLevel         || '',
+      paymentMethod:     paymentInfo?.paymentMethod || 'Manual',
+      transactionId:     paymentInfo?.utrNumber     || '',
+      senderName:        paymentInfo?.senderName        || '',
+      senderUpiId:       paymentInfo?.senderUpiId       || '',
+      accountHolderName: paymentInfo?.accountHolderName || '',
+      lastFourDigits:    paymentInfo?.lastFourDigits    || '',
+      paymentDate:       paymentInfo?.paymentDate       || '',
+      paymentTime:       paymentInfo?.paymentTime       || '',
+      education:         formData.education         || '[]',
+      hasScreenshot:     !!uploadedFiles?.screenshot,
+      hasBankPassbook:   !!uploadedFiles?.bankPassbook,
+      // pdfBase64 baad mein bhejenge — pehle registrationNo lo
+    })
+
+    // ✅ registrationNo Apps Script se aaya
+    const registrationNo = scriptResult?.registrationNo
+    if (!registrationNo) {
+      console.error('[verify-payment] registrationNo missing from Apps Script response')
+      return res.status(500).json({ error: 'Registration number generate nahi hua. Please try again.' })
+    }
+
+    console.log('[verify-payment] RegNo from Apps Script:', registrationNo)
+
+    // ── PDF generate karo — ab registrationNo available hai ──
+    console.log('[verify-payment] Generating PDF...')
     const pdfFormData = {
-      // Personal details
       name:              formData?.name              || '',
       fatherName:        formData?.fatherName        || '',
       motherName:        formData?.motherName        || '',
@@ -270,34 +306,20 @@ export default async function handler(req, res) {
       nationality:       formData?.nationality       || 'Indian',
       aadhar:            formData?.aadhar            || '',
       qualification:     formData?.qualification     || '',
-
-      // Contact
       mobile:            formData?.mobile            || '',
       email:             formData?.email             || '',
-
-      // Address
       state:             formData?.state             || '',
       district:          formData?.district          || '',
-      block:             formData?.block             || '',   // ✅ NEW
-      pincode:           formData?.pincode           || '',   // ✅ NEW
+      block:             formData?.block             || '',
+      pincode:           formData?.pincode           || '',
       address:           formData?.address           || '',
-
-      // Bank details ✅ NEW
       bankAccountNo:     formData?.bankAccountNo     || '',
       bankIfsc:          formData?.bankIfsc          || '',
       bankName:          formData?.bankName          || '',
-
-      // Post info
       postTitle:         formData?.postTitle         || '',
       postLevel:         formData?.postLevel         || '',
-
-      // Education (JSON string)
       education:         formData?.education         || '[]',
-
-      // Registration
       registrationNo,
-
-      // Payment
       paymentMethod:     paymentInfo?.paymentMethod     || 'Manual',
       utrNumber:         paymentInfo?.utrNumber         || '—',
       senderName:        paymentInfo?.senderName        || '',
@@ -322,81 +344,32 @@ export default async function handler(req, res) {
     const filename  = `Application_${safeName}_${registrationNo}.pdf`
     console.log('[verify-payment] PDF generated ✅ | size:', pdfBytes.length, 'bytes')
 
-    // ── Apps Script — sheet + Drive upload ──
-    let driveLink = null
-    try {
-      const scriptResult = await submitToAppsScript({
-        registrationNo,
-
-        // Personal
-        name:              formData.name,
-        fatherName:        formData.fatherName        || '',
-        motherName:        formData.motherName        || '',
-        dob:               formData.dob               || '',
-        mobile:            formData.mobile            || '',
-        email:             formData.email,
-        gender:            formData.gender            || '',
-        category:          formData.category          || '',
-        nationality:       formData.nationality       || 'Indian',
-        qualification:     formData.qualification     || '',
-        aadhar:            formData.aadhar            || '',
-
-        // Address ✅ NEW fields included
-        state:             formData.state             || '',
-        district:          formData.district          || '',
-        block:             formData.block             || '',   // ✅
-        pincode:           formData.pincode           || '',   // ✅
-        address:           formData.address           || '',
-
-        // Bank ✅ NEW
-        bankAccountNo:     formData.bankAccountNo     || '',
-        bankIfsc:          formData.bankIfsc          || '',
-        bankName:          formData.bankName          || '',
-
-        // Post
-        postTitle:         formData.postTitle         || '',
-        postLevel:         formData.postLevel         || '',
-
-        // Payment
-        paymentMethod:     paymentInfo?.paymentMethod || 'Manual',
-        transactionId:     paymentInfo?.utrNumber     || '',
-        senderName:        paymentInfo?.senderName        || '',
-        senderUpiId:       paymentInfo?.senderUpiId       || '',
-        accountHolderName: paymentInfo?.accountHolderName || '',
-        lastFourDigits:    paymentInfo?.lastFourDigits    || '',
-        paymentDate:       paymentInfo?.paymentDate       || '',
-        paymentTime:       paymentInfo?.paymentTime       || '',
-
-        // Education
-        education:         formData.education         || '[]',
-
-        // File flags ✅
-        hasScreenshot:     !!uploadedFiles?.screenshot,
-        hasBankPassbook:   !!uploadedFiles?.bankPassbook,   // ✅
-
-        // PDF
-        pdfBase64,
-      })
-      driveLink = scriptResult?.driveLink || null
-      console.log('[verify-payment] Apps Script ✅ | driveLink:', driveLink)
-    } catch (err) {
-      console.error('[verify-payment] Apps Script FAILED (non-fatal):', err.message)
+    // ── PDF Drive pe upload karo (separate call) ──
+    let driveLink = scriptResult?.driveLink || null
+    if (!driveLink || driveLink === '—') {
+      try {
+        const uploadResult = await submitToAppsScript({
+          action:         'uploadPDF',
+          registrationNo,
+          name:           formData.name,
+          pdfBase64,
+        })
+        driveLink = uploadResult?.driveLink || null
+        console.log('[verify-payment] Drive upload ✅ | driveLink:', driveLink)
+      } catch (err) {
+        console.error('[verify-payment] Drive upload FAILED (non-fatal):', err.message)
+      }
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // ── EMAIL SECTION ────────────────────────────────────────────────────────
-    // ── EMAIL BAND KARNA HO TO: neeche wala poora try-catch block COMMENT OUT karo ──
-    // ── EMAIL CHALU KARNA HO TO: comment hatao ───────────────────────────────
-    // ════════════════════════════════════════════════════════════════════════
-
+    // ── Email bhejo ──
+    // EMAIL BAND KARNA HO TO: neeche wala try-catch block comment out karo
     try {
       await sendEmails(formData, paymentInfo || {}, pdfBase64, filename, driveLink, registrationNo)
       console.log('[verify-payment] Emails sent ✅')
     } catch (err) {
       console.error('[verify-payment] Email FAILED (non-fatal):', err.message)
     }
-
-    // ── EMAIL SECTION END ────────────────────────────────────────────────────
+    // EMAIL SECTION END
 
     // ── Success response ──
     return res.status(200).json({
@@ -404,7 +377,7 @@ export default async function handler(req, res) {
       pdfBase64,
       filename,
       driveLink:      driveLink || null,
-      registrationNo,
+      registrationNo,  // ✅ Apps Script se aaya, frontend ko bheja
     })
 
   } catch (error) {
