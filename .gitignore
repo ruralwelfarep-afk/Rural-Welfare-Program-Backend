@@ -30,3 +30,9 @@ dist-ssr
 # Sensitive files
 googleService.json
 rzp-key.csv
+
+
+# .gitignore mein ye hona chahiye
+.env
+.env.local
+.env.production
