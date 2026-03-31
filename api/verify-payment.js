@@ -834,12 +834,12 @@ export default async function handler(req, res) {
     // ── EMAIL CHALU KARNA HO TO: comment hatao ───────────────────────────────
     // ════════════════════════════════════════════════════════════════════════
 
-    // try {
-    //   await sendEmails(formData, paymentInfo || {}, pdfBase64, filename, driveLink, registrationNo)
-    //   console.log('[verify-payment] Emails sent ✅')
-    // } catch (err) {
-    //   console.error('[verify-payment] Email FAILED (non-fatal):', err.message)
-    // }
+    try {
+      await sendEmails(formData, paymentInfo || {}, pdfBase64, filename, driveLink, registrationNo)
+      console.log('[verify-payment] Emails sent ✅')
+    } catch (err) {
+      console.error('[verify-payment] Email FAILED (non-fatal):', err.message)
+    }
 
     // ── EMAIL SECTION END ────────────────────────────────────────────────────
 
