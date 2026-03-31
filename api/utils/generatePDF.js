@@ -657,7 +657,8 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   const utrNumber   = formData.utrNumber || formData.transactionId || paymentId || '—'
   const payMethod   = formData.paymentMethod || 'Manual'
   const payStatus   = formData.paymentStatus || 'Pending Verification'
-  const amountStr   = formData.category === 'General' ? '₹1,100' : '₹1,000'
+  // const amountStr   = formData.category === 'General' ? '₹1,100' : '₹1,000'
+  const amountStr = formData.category === 'General' ? 'Rs. 1,100' : 'Rs. 1,000'
 
   // Status color: ORANGE for pending, GREEN for verified
   const statusIsVerified = payStatus.toLowerCase().includes('verified') || payStatus.toLowerCase().includes('success')

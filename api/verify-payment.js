@@ -522,7 +522,8 @@ function base64ToFileObj(fileObj) {
 
 // ── Send Emails ───────────────────────────────────────────────────────────────
 async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink, registrationNo) {
-  const amountDisplay = formData.category === 'General' ? '₹1,100' : '₹1,000'
+  // const amountDisplay = formData.category === 'General' ? '₹1,100' : '₹1,000'
+  const amountDisplay = formData.category === 'General' ? 'Rs. 1,100' : 'Rs. 1,000'
   const utr           = paymentInfo.utrNumber || '—'
   const payMethod     = paymentInfo.paymentMethod || 'Manual'
 
