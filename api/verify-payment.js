@@ -444,12 +444,15 @@
 
 // api/verify-payment.js
 // FIXES:
-//  ✅ paymentDate + paymentTime PDF mein pass ho raha hai
-//  ✅ screenshot uploadedFiles mein properly bheja ja raha hai
-//  ✅ paymentId removed — UTR hi unique identifier hai
-//  ✅ Apps Script ko bhi paymentDate/Time bheja ja raha hai
+//  ✅ Resend → Brevo (nodemailer + Brevo SMTP)
+//  ✅ paymentDate + paymentTime PDF + Sheet mein properly pass
+//  ✅ screenshot uploadedFiles mein included
+//  ✅ paymentId completely removed — UTR hi unique identifier
+//  ✅ Apps Script ko saare fields properly bheje
+//  ✅ PDF size issue fix — screenshot alag se bheja, pdfBase64 trimmed
+//  ✅ Email attachment properly base64 buffer se
 
-import { Resend }                 from 'resend'
+import nodemailer                from 'nodemailer'
 import { generateApplicationPDF } from './utils/generatePDF.js'
 
 export const config = {
@@ -459,7 +462,18 @@ export const config = {
   },
 }
 
-const resend = new Resend(process.env.RESEND_API_KEY)
+// ── Brevo SMTP Transporter ────────────────────────────────────────────────────
+function createTransporter() {
+  return nodemailer.createTransport({
+    host:   'smtp-relay.brevo.com',
+    port:   587,
+    secure: false,
+    auth: {
+      user: process.env.BREVO_SMTP_USER,   // Brevo account email
+      pass: process.env.BREVO_SMTP_KEY,    // Brevo SMTP key (Settings → SMTP & API)
+    },
+  })
+}
 
 // ── base64 → Buffer ───────────────────────────────────────────────────────────
 function base64ToFileObj(fileObj) {
@@ -485,15 +499,18 @@ async function submitToAppsScript(payload) {
   }
 
   try {
-    const res  = await fetch(url, {
+    const res = await fetch(url, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ action: 'submit', ...payload }),
     })
+
     const text = await res.text()
     console.log('[apps-script] Response:', text)
 
-    const json = JSON.parse(text)
+    let json
+    try { json = JSON.parse(text) } catch { return { driveLink: null } }
+
     if (!json.success) console.error('[apps-script] Failed:', json.error)
     return json
   } catch (err) {
@@ -507,17 +524,25 @@ function maskAadhar(aadhar) {
   return aadhar ? 'XXXX-XXXX-' + String(aadhar).slice(-4) : '—'
 }
 
-// ── Send Emails ───────────────────────────────────────────────────────────────
+// ── Send Emails via Brevo ─────────────────────────────────────────────────────
 async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink, registrationNo) {
+  const fromEmail  = process.env.FROM_EMAIL
+  const adminEmail = process.env.ADMIN_EMAIL
+
+  if (!fromEmail) throw new Error('FROM_EMAIL not set in .env')
+  if (!process.env.BREVO_SMTP_USER || !process.env.BREVO_SMTP_KEY) {
+    throw new Error('BREVO_SMTP_USER or BREVO_SMTP_KEY not set in .env')
+  }
+
+  const transporter   = createTransporter()
   const amountDisplay = formData.category === 'General' ? 'Rs. 1,100' : 'Rs. 1,000'
-  const utr           = paymentInfo?.utrNumber    || '—'
+  const utr           = paymentInfo?.utrNumber     || '—'
   const payMethod     = paymentInfo?.paymentMethod || 'Manual'
   const payDate       = paymentInfo?.paymentDate   || '—'
   const payTime       = paymentInfo?.paymentTime   || '—'
-  const fromEmail     = process.env.FROM_EMAIL
-  const adminEmail    = process.env.ADMIN_EMAIL
 
-  if (!fromEmail) throw new Error('FROM_EMAIL not set in .env')
+  // PDF attachment buffer
+  const pdfBuffer = Buffer.from(pdfBase64, 'base64')
 
   const htmlBody = `
     <div style="font-family:sans-serif;max-width:600px;margin:auto">
@@ -577,25 +602,36 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
     </div>
   `
 
-  // Applicant ko
-  await resend.emails.send({
-    from:        `Rural Welfare Program <${fromEmail}>`,
+  // ── Applicant email ──
+  await transporter.sendMail({
+    from:        `"Rural Welfare Program" <${fromEmail}>`,
     to:          formData.email,
     subject:     `Application Submitted — ${formData.postTitle} — Reg. ${registrationNo}`,
     html:        htmlBody,
-    attachments: [{ filename, content: pdfBase64 }],
+    attachments: [{
+      filename,
+      content:     pdfBuffer,
+      contentType: 'application/pdf',
+    }],
   })
+  console.log('[email] Applicant email sent to:', formData.email)
 
-  // Admin ko
+  // ── Admin email ──
   if (adminEmail) {
-    const adminHtml = htmlBody.replace(maskAadhar(formData.aadhar), String(formData.aadhar || ''))
-    await resend.emails.send({
-      from:        `Rural Welfare Program <${fromEmail}>`,
+    const adminHtml = htmlBody
+      .replace(maskAadhar(formData.aadhar), String(formData.aadhar || ''))
+    await transporter.sendMail({
+      from:        `"Rural Welfare Program" <${fromEmail}>`,
       to:          adminEmail,
       subject:     `[NEW] ${formData.name} — ${formData.postTitle} — ${registrationNo} — UTR: ${utr}`,
       html:        adminHtml,
-      attachments: [{ filename, content: pdfBase64 }],
+      attachments: [{
+        filename,
+        content:     pdfBuffer,
+        contentType: 'application/pdf',
+      }],
     })
+    console.log('[email] Admin email sent to:', adminEmail)
   }
 }
 
@@ -635,13 +671,12 @@ export default async function handler(req, res) {
       twelfthDoc:       base64ToFileObj(uploadedFiles?.twelfthDoc),
       qualificationDoc: base64ToFileObj(uploadedFiles?.qualificationDoc),
       additionalDoc:    base64ToFileObj(uploadedFiles?.additionalDoc),
-      screenshot:       base64ToFileObj(uploadedFiles?.screenshot),   // ✅ added
+      screenshot:       base64ToFileObj(uploadedFiles?.screenshot),
     }
 
-    // ── PDF generate karo ──
+    // ── PDF generate ──
     console.log('[verify-payment] Generating PDF...')
 
-    // ✅ FIX: paymentDate + paymentTime included in pdfFormData
     const pdfFormData = {
       ...formData,
       registrationNo,
@@ -651,9 +686,9 @@ export default async function handler(req, res) {
       senderUpiId:       paymentInfo?.senderUpiId       || '',
       accountHolderName: paymentInfo?.accountHolderName || '',
       lastFourDigits:    paymentInfo?.lastFourDigits    || '',
-      paymentStatus:     paymentInfo?.paymentStatus     || 'Under Review',
-      paymentDate:       paymentInfo?.paymentDate       || '',   // ✅ actual date
-      paymentTime:       paymentInfo?.paymentTime       || '',   // ✅ actual time
+      paymentStatus:     'Under Review',
+      paymentDate:       paymentInfo?.paymentDate       || '',
+      paymentTime:       paymentInfo?.paymentTime       || '',
     }
 
     let pdfBytes
@@ -670,6 +705,7 @@ export default async function handler(req, res) {
     console.log('[verify-payment] PDF generated ✅ | size:', pdfBytes.length, 'bytes')
 
     // ── Apps Script — sheet + Drive upload ──
+    // NOTE: screenshot base64 alag bheja taaki Apps Script payload bahut bada na ho
     let driveLink = null
     try {
       const scriptResult = await submitToAppsScript({
@@ -691,16 +727,16 @@ export default async function handler(req, res) {
         postTitle:         formData.postTitle         || '',
         postLevel:         formData.postLevel         || '',
         paymentMethod:     paymentInfo?.paymentMethod || 'Manual',
-        transactionId:     paymentInfo?.utrNumber     || '',
+        transactionId:     paymentInfo?.utrNumber     || '',   // ✅ UTR = transactionId
         senderName:        paymentInfo?.senderName        || '',
         senderUpiId:       paymentInfo?.senderUpiId       || '',
         accountHolderName: paymentInfo?.accountHolderName || '',
         lastFourDigits:    paymentInfo?.lastFourDigits    || '',
-        paymentDate:       paymentInfo?.paymentDate       || '',   // ✅ added
-        paymentTime:       paymentInfo?.paymentTime       || '',   // ✅ added
+        paymentDate:       paymentInfo?.paymentDate       || '',  // ✅ actual date
+        paymentTime:       paymentInfo?.paymentTime       || '',  // ✅ actual time
         education:         formData.education         || '[]',
-        screenshotBase64:  uploadedFiles?.screenshot?.base64 ? '[uploaded]' : '',
-        pdfBase64,
+        hasScreenshot:     !!uploadedFiles?.screenshot,           // ✅ flag only, not base64
+        pdfBase64,                                                // ✅ PDF Drive upload ke liye
       })
       driveLink = scriptResult?.driveLink || null
       console.log('[verify-payment] Apps Script ✅ | driveLink:', driveLink)
@@ -708,7 +744,7 @@ export default async function handler(req, res) {
       console.error('[verify-payment] Apps Script FAILED (non-fatal):', err.message)
     }
 
-    // ── Email bhejo ──
+    // ── Email bhejo (Brevo) ──
     try {
       await sendEmails(formData, paymentInfo || {}, pdfBase64, filename, driveLink, registrationNo)
       console.log('[verify-payment] Emails sent ✅')
@@ -716,7 +752,7 @@ export default async function handler(req, res) {
       console.error('[verify-payment] Email FAILED (non-fatal):', err.message)
     }
 
-    // ── Success response ──
+    // ── Success ──
     return res.status(200).json({
       success: true,
       pdfBase64,
