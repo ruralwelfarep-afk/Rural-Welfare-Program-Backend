@@ -446,13 +446,13 @@
 
 
 
-
-
 // backend/api/utils/generatePDF.js
-// CHANGES FROM ORIGINAL:
-//  ✅ Payment Status section updated — shows paymentMethod, UTR, status
-//  ✅ All layout constants and visual design UNCHANGED
-//  ✅ Works in frontend (browser) AND backend (Node.js)
+// FIXES:
+//  ✅ Screenshot page PDF mein add hogi
+//  ✅ Payment Status hamesha "Under Review" dikhega
+//  ✅ Payment Date/Time actual values se aayenge
+//  ✅ getLogoPath() ESM bug fixed (__dir use karo, __dirname nahi)
+//  ✅ Payment Date/Time payRows mein properly dikhega
 
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib'
 
@@ -474,9 +474,8 @@ function getLogoPath() {
   try {
     if (!fileURLToPath || !dirname || !resolve) return null
     const __filename = fileURLToPath(import.meta.url)
-    const __dir      = dirname(__filename)
-    return resolve(__dirname, '../../public/logo.webp')
-     
+    const __dir      = dirname(__filename)              // ← FIX: __dir, not __dirname
+    return resolve(__dir, '../../public/logo.webp')
   } catch (_) { return null }
 }
 
@@ -489,7 +488,7 @@ const WHITE  = rgb(1, 1, 1)
 const RED    = rgb(0.85, 0.1, 0.1)
 const ORANGE = rgb(0.9, 0.5, 0.0)
 
-// ── LAYOUT CONSTANTS (UNCHANGED) ──────────────────────────────────────────────
+// ── LAYOUT CONSTANTS ──────────────────────────────────────────────────────────
 const BX     = 36
 const BWIDTH = 595 - 72
 const PAD    = 12
@@ -532,7 +531,7 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   const page = pdfDoc.addPage([595, 842])
   const { width, height } = page.getSize()
 
-  // ── HEADER (UNCHANGED) ────────────────────────────────────────────────────────
+  // ── HEADER ────────────────────────────────────────────────────────────────────
   const headerH = 72
   page.drawRectangle({ x: 0, y: height - headerH, width, height: headerH, color: GREEN })
 
@@ -565,7 +564,7 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   const YELLOW_BOTTOM    = height - headerH - 6
   const GAP_AFTER_YELLOW = 30
 
-  // ── POST + REG NO (UNCHANGED) ─────────────────────────────────────────────────
+  // ── POST + REG NO ─────────────────────────────────────────────────────────────
   let y = YELLOW_BOTTOM - GAP_AFTER_YELLOW - 4
   const ROW_H        = 22
   const borderStartY = y + ROW_H
@@ -575,11 +574,11 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   page.drawText((formData.postTitle || '').toUpperCase(),
                                     { x: CX + 75,  y, size: 11, font: boldFont,    color: GREEN })
   page.drawText('Registration No.', { x: CX + 270, y, size: 11, font: boldFont,    color: GRAY  })
-  page.drawText(String(formData.registrationNo || paymentId.slice(-10).toUpperCase()),
+  page.drawText(String(formData.registrationNo || ''),
                                     { x: CX + 385, y, size: 11, font: boldFont,    color: GREEN })
   y -= ROW_H + 2
 
-  // ── PERSONAL DETAILS (UNCHANGED) ─────────────────────────────────────────────
+  // ── PERSONAL DETAILS ──────────────────────────────────────────────────────────
   const PERS_FS = 10
   const PERS_RH = 21
   const val1X   = CX + 100
@@ -594,7 +593,7 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
     ['Aadhaar Number',  formData.aadhar,                  'Email Id',       formData.email],
     ['State',           formData.state,                   'District',       formData.district],
     ['Qualification',   formData.qualification,           'Reg. Date',      new Date().toLocaleDateString('en-IN')],
-    ['Address',         String(formData.address || '—').substring(0, 38),   'Status', 'SUCCESS'],
+    ['Address',         String(formData.address || '—').substring(0, 38),   'Status', 'SUBMITTED'],
   ]
 
   for (let i = 0; i < personalRows.length; i++) {
@@ -608,7 +607,7 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   }
   y -= 6
 
-  // ── EDUCATION TABLE (UNCHANGED) ───────────────────────────────────────────────
+  // ── EDUCATION TABLE ───────────────────────────────────────────────────────────
   y = drawSectionHeader(page, fonts, y, 'Education Eligibility')
 
   const EDU_FS = 9
@@ -648,45 +647,48 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   })
   y -= 8
 
-  // ── PAYMENT STATUS (UPDATED — new fields added) ───────────────────────────────
+  // ── PAYMENT DETAILS ───────────────────────────────────────────────────────────
   y = drawSectionHeader(page, fonts, y, 'Payment Details')
 
   const PAY_FS = 10
   const PAY_RH = 21
 
-  // Determine UTR and display values
-  const utrNumber   = formData.utrNumber || formData.transactionId || paymentId || '—'
-  const payMethod   = formData.paymentMethod || 'Manual'
-  const payStatus   = formData.paymentStatus || 'Pending Verification'
-  // const amountStr   = formData.category === 'General' ? '₹1,100' : '₹1,000'
+  const utrNumber = formData.utrNumber || formData.transactionId || '—'
+  const payMethod = formData.paymentMethod || 'Manual'
   const amountStr = formData.category === 'General' ? 'Rs. 1,100' : 'Rs. 1,000'
 
-  // Status color: ORANGE for pending, GREEN for verified
-  const statusIsVerified = payStatus.toLowerCase().includes('verified') || payStatus.toLowerCase().includes('success')
-  const statusColor      = statusIsVerified ? GREEN : ORANGE
+  // ✅ FIX: Payment Date/Time actual values se
+  const payDateTimeStr = [formData.paymentDate, formData.paymentTime]
+    .filter(Boolean)
+    .join(' at ') || new Date().toLocaleDateString('en-IN')
+
+  // ✅ FIX: Status hamesha "Under Review" (orange)
+  const statusColor = ORANGE
 
   const payRows = [
-    ['Payment Method',    payMethod],
-    ['UTR / Txn. ID',     utrNumber],
+    ['Payment Method',      payMethod],
+    ['UTR / Txn. ID',       utrNumber],
+    ...(payMethod === 'UPI' && formData.senderName
+      ? [['Sender Name',    formData.senderName]]
+      : []),
     ...(payMethod === 'UPI' && formData.senderUpiId
-      ? [['Sender UPI ID', formData.senderUpiId]]
+      ? [['Sender UPI ID',  formData.senderUpiId]]
       : []),
     ...(payMethod === 'Bank Transfer' && formData.accountHolderName
       ? [
-          ['Account Holder',   formData.accountHolderName],
-          ['Account (Last 4)', formData.lastFourDigits ? `XXXX-${formData.lastFourDigits}` : '—'],
+          ['Account Holder',    formData.accountHolderName],
+          ['Account (Last 4)',  formData.lastFourDigits ? `XXXX-${formData.lastFourDigits}` : '—'],
         ]
       : []),
-    ['Amount',            amountStr],
-    ['Payment Date',      new Date().toLocaleString('en-IN')],
-    ['Payment Status',    payStatus],
+    ['Amount',              amountStr],
+    ['Payment Date / Time', payDateTimeStr],        // ✅ actual date/time
+    ['Payment Status',      'Under Review'],         // ✅ always "Under Review"
   ]
 
   payRows.forEach(([label, value], i) => {
     if (i % 2 === 0) page.drawRectangle({ x: BX, y: y - 4, width: BWIDTH, height: PAY_RH, color: LGREEN })
     page.drawText(label, { x: CX + 36,  y, size: PAY_FS, font: boldFont,    color: GRAY  })
 
-    // Status row — colored text
     if (label === 'Payment Status') {
       page.drawText(String(value), { x: CX + 220, y, size: PAY_FS, font: boldFont, color: statusColor })
     } else {
@@ -696,7 +698,7 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   })
   y -= 8
 
-  // ── UPLOADED DOCUMENTS (UNCHANGED) ───────────────────────────────────────────
+  // ── UPLOADED DOCUMENTS ────────────────────────────────────────────────────────
   y = drawSectionHeader(page, fonts, y, 'Uploaded Documents')
 
   const DOC_FS = 10
@@ -707,8 +709,8 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
     { key: 'aadharDoc',     label: 'Aadhar Card' },
     { key: 'tenthDoc',      label: '10th Class Marksheet' },
     { key: 'twelfthDoc',    label: '12th Class Marksheet' },
-    { key: 'graduationDoc', label: 'Graduation Certificate / Marksheet' },
     { key: 'additionalDoc', label: 'Additional Document' },
+    { key: 'screenshot',    label: 'Payment Screenshot' },  // ✅ added
   ]
 
   const halfCW = Math.floor(CWIDTH / 2)
@@ -732,7 +734,7 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   const docRows = Math.ceil(allDocs.length / 2)
   y -= docRows * DOC_RH + 12
 
-  // ── DATE / PHOTO / SIGNATURE BOXES (UNCHANGED) ────────────────────────────────
+  // ── DATE / PHOTO / SIGNATURE BOXES ───────────────────────────────────────────
   const boxH      = 95
   const boxY      = y - boxH
   const gap       = 3
@@ -802,7 +804,7 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
     page.drawText('Signature', { x: sigX + (sigW - textWidth('Signature', 10)) / 2, y: boxY + (boxH - 20) / 2 - 5, size: 10, font: regularFont, color: GRAY })
   }
 
-  // ── DECLARATION FOOTER (UNCHANGED) ───────────────────────────────────────────
+  // ── DECLARATION FOOTER ────────────────────────────────────────────────────────
   const footerH = 72
   page.drawRectangle({ x: 0, y: 0, width, height: footerH, color: GREEN })
   page.drawText('Declaration:', { x: CX, y: footerH - 14, size: 9.5, font: boldFont, color: YELLOW })
@@ -822,7 +824,7 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
     x: CX, y: 8, size: 7, font: regularFont, color: rgb(0.6, 0.8, 0.6),
   })
 
-  // ── CONTENT BORDER (UNCHANGED) ────────────────────────────────────────────────
+  // ── CONTENT BORDER ────────────────────────────────────────────────────────────
   page.drawRectangle({
     x: BX,
     y: borderEndY,
@@ -832,13 +834,14 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
     borderWidth: 2,
   })
 
-  // ── PAGE 2+: ATTACHED DOCUMENTS (UNCHANGED) ───────────────────────────────────
+  // ── PAGE 2+: ATTACHED DOCUMENTS ───────────────────────────────────────────────
+  // ✅ FIX: screenshot bhi included
   const docFiles = [
     { key: 'aadharDoc',     label: 'Aadhar Card' },
     { key: 'tenthDoc',      label: '10th Class Marksheet' },
     { key: 'twelfthDoc',    label: '12th Class Marksheet' },
-    { key: 'graduationDoc', label: 'Graduation Certificate / Marksheet' },
     { key: 'additionalDoc', label: 'Additional Document' },
+    { key: 'screenshot',    label: 'Payment Screenshot' },   // ✅ added
   ]
 
   for (const { key, label } of docFiles) {

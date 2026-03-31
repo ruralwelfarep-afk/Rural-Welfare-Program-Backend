@@ -443,12 +443,11 @@
 
 
 // api/verify-payment.js
-// MANUAL PAYMENT VERSION — No Razorpay, No googleapis
-// ARCHITECTURE:
-//  ✅ Backend: PDF generate karo → Apps Script ko bhejo
-//  ✅ Apps Script: Sheet mein data daalo + PDF Drive pe upload karo
-//  ✅ Email: Resend se bhejo (PDF attached)
-//  ✅ No service account needed — Drive ka kaam Apps Script karta hai
+// FIXES:
+//  ✅ paymentDate + paymentTime PDF mein pass ho raha hai
+//  ✅ screenshot uploadedFiles mein properly bheja ja raha hai
+//  ✅ paymentId removed — UTR hi unique identifier hai
+//  ✅ Apps Script ko bhi paymentDate/Time bheja ja raha hai
 
 import { Resend }                 from 'resend'
 import { generateApplicationPDF } from './utils/generatePDF.js'
@@ -462,7 +461,7 @@ export const config = {
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
-// ── base64 → Buffer (PDF generation ke liye) ─────────────────────────────────
+// ── base64 → Buffer ───────────────────────────────────────────────────────────
 function base64ToFileObj(fileObj) {
   if (!fileObj?.base64) return null
   try {
@@ -477,7 +476,7 @@ function base64ToFileObj(fileObj) {
   }
 }
 
-// ── Apps Script ko call karo — sheet data + Drive PDF dono ───────────────────
+// ── Apps Script call ──────────────────────────────────────────────────────────
 async function submitToAppsScript(payload) {
   const url = process.env.APPS_SCRIPT_URL || process.env.VITE_APPS_SCRIPT_URL
   if (!url) {
@@ -495,9 +494,7 @@ async function submitToAppsScript(payload) {
     console.log('[apps-script] Response:', text)
 
     const json = JSON.parse(text)
-    if (!json.success) {
-      console.error('[apps-script] Failed:', json.error)
-    }
+    if (!json.success) console.error('[apps-script] Failed:', json.error)
     return json
   } catch (err) {
     console.error('[apps-script] Error:', err.message)
@@ -510,11 +507,13 @@ function maskAadhar(aadhar) {
   return aadhar ? 'XXXX-XXXX-' + String(aadhar).slice(-4) : '—'
 }
 
-// ── Resend se email bhejo ─────────────────────────────────────────────────────
+// ── Send Emails ───────────────────────────────────────────────────────────────
 async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink, registrationNo) {
   const amountDisplay = formData.category === 'General' ? 'Rs. 1,100' : 'Rs. 1,000'
-  const utr           = paymentInfo?.utrNumber   || '—'
+  const utr           = paymentInfo?.utrNumber    || '—'
   const payMethod     = paymentInfo?.paymentMethod || 'Manual'
+  const payDate       = paymentInfo?.paymentDate   || '—'
+  const payTime       = paymentInfo?.paymentTime   || '—'
   const fromEmail     = process.env.FROM_EMAIL
   const adminEmail    = process.env.ADMIN_EMAIL
 
@@ -530,7 +529,7 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
         <p>Dear <strong>${formData.name}</strong>,</p>
         <p>Your application for <strong>${formData.postTitle}</strong> has been submitted.</p>
         <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:12px;font-size:13px;margin:16px 0">
-          ⏳ <strong>Payment Status: Pending Verification</strong><br/>
+          ⏳ <strong>Payment Status: Under Review</strong><br/>
           Your payment will be verified within 24 hours.
         </div>
         <table style="width:100%;border-collapse:collapse;font-size:14px;margin:16px 0">
@@ -551,16 +550,20 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
             <td style="padding:8px 12px">${utr}</td>
           </tr>
           <tr style="background:#f0f7f0">
+            <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Payment Date / Time</td>
+            <td style="padding:8px 12px">${payDate} at ${payTime}</td>
+          </tr>
+          <tr>
             <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Amount</td>
             <td style="padding:8px 12px">${amountDisplay}</td>
           </tr>
-          <tr>
+          <tr style="background:#f0f7f0">
             <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Aadhar (masked)</td>
             <td style="padding:8px 12px">${maskAadhar(formData.aadhar)}</td>
           </tr>
-          <tr style="background:#f0f7f0">
+          <tr>
             <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Status</td>
-            <td style="padding:8px 12px;color:#856404;font-weight:bold">⏳ Pending Verification</td>
+            <td style="padding:8px 12px;color:#856404;font-weight:bold">⏳ Under Review</td>
           </tr>
         </table>
         <p>
@@ -608,7 +611,7 @@ export default async function handler(req, res) {
   console.log('[verify-payment] Request received')
 
   try {
-    const { registrationNo, paymentId, formData, paymentInfo, uploadedFiles } = req.body
+    const { registrationNo, formData, paymentInfo, uploadedFiles } = req.body
 
     // ── Validation ──
     if (!formData?.name || !formData?.email) {
@@ -630,13 +633,15 @@ export default async function handler(req, res) {
       aadharDoc:        base64ToFileObj(uploadedFiles?.aadharDoc),
       tenthDoc:         base64ToFileObj(uploadedFiles?.tenthDoc),
       twelfthDoc:       base64ToFileObj(uploadedFiles?.twelfthDoc),
-      graduationDoc:    base64ToFileObj(uploadedFiles?.graduationDoc),
       qualificationDoc: base64ToFileObj(uploadedFiles?.qualificationDoc),
       additionalDoc:    base64ToFileObj(uploadedFiles?.additionalDoc),
+      screenshot:       base64ToFileObj(uploadedFiles?.screenshot),   // ✅ added
     }
 
     // ── PDF generate karo ──
     console.log('[verify-payment] Generating PDF...')
+
+    // ✅ FIX: paymentDate + paymentTime included in pdfFormData
     const pdfFormData = {
       ...formData,
       registrationNo,
@@ -646,12 +651,14 @@ export default async function handler(req, res) {
       senderUpiId:       paymentInfo?.senderUpiId       || '',
       accountHolderName: paymentInfo?.accountHolderName || '',
       lastFourDigits:    paymentInfo?.lastFourDigits    || '',
-      paymentStatus:     paymentInfo?.paymentStatus     || 'Pending Verification',
+      paymentStatus:     paymentInfo?.paymentStatus     || 'Under Review',
+      paymentDate:       paymentInfo?.paymentDate       || '',   // ✅ actual date
+      paymentTime:       paymentInfo?.paymentTime       || '',   // ✅ actual time
     }
 
     let pdfBytes
     try {
-      pdfBytes = await generateApplicationPDF(pdfFormData, paymentId, filesForPDF)
+      pdfBytes = await generateApplicationPDF(pdfFormData, registrationNo, filesForPDF)
     } catch (err) {
       console.error('[verify-payment] PDF generation failed:', err)
       return res.status(500).json({ error: 'PDF generation failed: ' + err.message })
@@ -662,12 +669,11 @@ export default async function handler(req, res) {
     const filename  = `Application_${safeName}_${registrationNo}.pdf`
     console.log('[verify-payment] PDF generated ✅ | size:', pdfBytes.length, 'bytes')
 
-    // ── Apps Script ko bhejo — sheet + Drive upload dono wahan se hoga ──
+    // ── Apps Script — sheet + Drive upload ──
     let driveLink = null
     try {
       const scriptResult = await submitToAppsScript({
         registrationNo,
-        paymentId,
         name:              formData.name,
         fatherName:        formData.fatherName        || '',
         motherName:        formData.motherName        || '',
@@ -690,9 +696,10 @@ export default async function handler(req, res) {
         senderUpiId:       paymentInfo?.senderUpiId       || '',
         accountHolderName: paymentInfo?.accountHolderName || '',
         lastFourDigits:    paymentInfo?.lastFourDigits    || '',
+        paymentDate:       paymentInfo?.paymentDate       || '',   // ✅ added
+        paymentTime:       paymentInfo?.paymentTime       || '',   // ✅ added
         education:         formData.education         || '[]',
         screenshotBase64:  uploadedFiles?.screenshot?.base64 ? '[uploaded]' : '',
-        // ← PDF base64 Apps Script ko de rahe hain Drive upload ke liye
         pdfBase64,
       })
       driveLink = scriptResult?.driveLink || null
