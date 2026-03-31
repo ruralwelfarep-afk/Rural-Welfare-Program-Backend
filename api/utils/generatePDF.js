@@ -445,18 +445,10 @@
 
 
 
-
 // backend/api/utils/generatePDF.js
-// FIXES:
-//  ✅ Screenshot page PDF mein add hogi
-//  ✅ Payment Status hamesha "Under Review" dikhega
-//  ✅ Payment Date/Time actual values se aayenge
-//  ✅ getLogoPath() ESM bug fixed (__dir use karo, __dirname nahi)
-//  ✅ Payment Date/Time payRows mein properly dikhega
 
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib'
 
-// Only load these in Node.js (backend). Frontend skips them.
 let existsSync, resolve, dirname, fileURLToPath
 try {
   const fs   = await import('fs').catch(() => null)
@@ -474,7 +466,7 @@ function getLogoPath() {
   try {
     if (!fileURLToPath || !dirname || !resolve) return null
     const __filename = fileURLToPath(import.meta.url)
-    const __dir      = dirname(__filename)              // ← FIX: __dir, not __dirname
+    const __dir      = dirname(__filename)
     return resolve(__dir, '../../public/logo.webp')
   } catch (_) { return null }
 }
@@ -592,6 +584,7 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
     ['Nationality',     formData.nationality || 'Indian', 'Mobile No.',     formData.mobile],
     ['Aadhaar Number',  formData.aadhar,                  'Email Id',       formData.email],
     ['State',           formData.state,                   'District',       formData.district],
+    ['Block',           formData.block || '—',            'Pincode',        formData.pincode || '—'],
     ['Qualification',   formData.qualification,           'Reg. Date',      new Date().toLocaleDateString('en-IN')],
     ['Address',         String(formData.address || '—').substring(0, 38),   'Status', 'SUBMITTED'],
   ]
@@ -647,6 +640,25 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   })
   y -= 8
 
+  // ── BANK DETAILS ──────────────────────────────────────────────────────────────
+  y = drawSectionHeader(page, fonts, y, 'Bank Details')
+
+  const BANK_FS = 10
+  const BANK_RH = 21
+  const bankRows = [
+    ['Bank Account No.', formData.bankAccountNo || '—'],
+    ['IFSC Code',        formData.bankIfsc       || '—'],
+    ['Bank Name',        formData.bankName       || '—'],
+  ]
+
+  bankRows.forEach(([label, value], i) => {
+    if (i % 2 === 0) page.drawRectangle({ x: BX, y: y - 4, width: BWIDTH, height: BANK_RH, color: LGREEN })
+    page.drawText(label,         { x: CX + 36,  y, size: BANK_FS, font: boldFont,    color: GRAY  })
+    page.drawText(String(value), { x: CX + 220, y, size: BANK_FS, font: regularFont, color: DGRAY })
+    y -= BANK_RH
+  })
+  y -= 8
+
   // ── PAYMENT DETAILS ───────────────────────────────────────────────────────────
   y = drawSectionHeader(page, fonts, y, 'Payment Details')
 
@@ -657,12 +669,10 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   const payMethod = formData.paymentMethod || 'Manual'
   const amountStr = formData.category === 'General' ? 'Rs. 1,100' : 'Rs. 1,000'
 
-  // ✅ FIX: Payment Date/Time actual values se
   const payDateTimeStr = [formData.paymentDate, formData.paymentTime]
     .filter(Boolean)
     .join(' at ') || new Date().toLocaleDateString('en-IN')
 
-  // ✅ FIX: Status hamesha "Under Review" (orange)
   const statusColor = ORANGE
 
   const payRows = [
@@ -681,8 +691,8 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
         ]
       : []),
     ['Amount',              amountStr],
-    ['Payment Date / Time', payDateTimeStr],        // ✅ actual date/time
-    ['Payment Status',      'Under Review'],         // ✅ always "Under Review"
+    ['Payment Date / Time', payDateTimeStr],
+    ['Payment Status',      'Under Review'],
   ]
 
   payRows.forEach(([label, value], i) => {
@@ -704,13 +714,14 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   const DOC_FS = 10
   const DOC_RH = 20
   const allDocs = [
-    { key: 'photo',         label: 'Applicant Photo' },
-    { key: 'signature',     label: 'Signature' },
-    { key: 'aadharDoc',     label: 'Aadhar Card' },
-    { key: 'tenthDoc',      label: '10th Class Marksheet' },
-    { key: 'twelfthDoc',    label: '12th Class Marksheet' },
-    { key: 'additionalDoc', label: 'Additional Document' },
-    { key: 'screenshot',    label: 'Payment Screenshot' },  // ✅ added
+    { key: 'photo',         label: 'Applicant Photo'       },
+    { key: 'signature',     label: 'Signature'             },
+    { key: 'aadharDoc',     label: 'Aadhar Card'           },
+    { key: 'bankPassbook',  label: 'Bank Passbook'         },
+    { key: 'tenthDoc',      label: '10th Class Marksheet'  },
+    { key: 'twelfthDoc',    label: '12th Class Marksheet'  },
+    { key: 'additionalDoc', label: 'Additional Document'   },
+    { key: 'screenshot',    label: 'Payment Screenshot'    },
   ]
 
   const halfCW = Math.floor(CWIDTH / 2)
@@ -835,13 +846,13 @@ export async function generateApplicationPDF(formData, paymentId, uploadedFiles)
   })
 
   // ── PAGE 2+: ATTACHED DOCUMENTS ───────────────────────────────────────────────
-  // ✅ FIX: screenshot bhi included
   const docFiles = [
-    { key: 'aadharDoc',     label: 'Aadhar Card' },
+    { key: 'aadharDoc',     label: 'Aadhar Card'          },
+    { key: 'bankPassbook',  label: 'Bank Passbook'        },
     { key: 'tenthDoc',      label: '10th Class Marksheet' },
     { key: 'twelfthDoc',    label: '12th Class Marksheet' },
-    { key: 'additionalDoc', label: 'Additional Document' },
-    { key: 'screenshot',    label: 'Payment Screenshot' },   // ✅ added
+    { key: 'additionalDoc', label: 'Additional Document'  },
+    { key: 'screenshot',    label: 'Payment Screenshot'   },
   ]
 
   for (const { key, label } of docFiles) {

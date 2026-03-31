@@ -443,16 +443,9 @@
 
 
 
-
 // api/verify-payment.js
-// FIXES:
-//  ✅ Resend → Brevo (nodemailer + Brevo SMTP)
-//  ✅ paymentDate + paymentTime PDF + Sheet mein properly pass
-//  ✅ screenshot uploadedFiles mein included
-//  ✅ paymentId completely removed — UTR hi unique identifier
-//  ✅ Apps Script ko saare fields properly bheje
-//  ✅ PDF size issue fix — screenshot alag se bheja, pdfBase64 trimmed
-//  ✅ Email attachment properly base64 buffer se
+// ✅ UPDATED: All new fields — Bank Details, Block, Pincode, Bank Passbook etc.
+// ✅ Email: Comment/uncomment the "sendEmails" block to enable/disable
 
 import nodemailer                from 'nodemailer'
 import { generateApplicationPDF } from './utils/generatePDF.js'
@@ -471,8 +464,8 @@ function createTransporter() {
     port:   587,
     secure: false,
     auth: {
-      user: process.env.BREVO_SMTP_USER,   // Brevo account email
-      pass: process.env.BREVO_SMTP_KEY,    // Brevo SMTP key (Settings → SMTP & API)
+      user: process.env.BREVO_SMTP_USER,
+      pass: process.env.BREVO_SMTP_KEY,
     },
   })
 }
@@ -526,7 +519,10 @@ function maskAadhar(aadhar) {
   return aadhar ? 'XXXX-XXXX-' + String(aadhar).slice(-4) : '—'
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 // ── Send Emails via Brevo ─────────────────────────────────────────────────────
+// ── EMAIL BAND KARNA HO TO: is poore function ko call mat karo (neeche dekho) ─
+// ─────────────────────────────────────────────────────────────────────────────
 async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink, registrationNo) {
   const fromEmail  = process.env.FROM_EMAIL
   const adminEmail = process.env.ADMIN_EMAIL
@@ -543,7 +539,6 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
   const payDate       = paymentInfo?.paymentDate   || '—'
   const payTime       = paymentInfo?.paymentTime   || '—'
 
-  // PDF attachment buffer
   const pdfBuffer = Buffer.from(pdfBase64, 'base64')
 
   const htmlBody = `
@@ -585,10 +580,38 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
             <td style="padding:8px 12px">${amountDisplay}</td>
           </tr>
           <tr style="background:#f0f7f0">
+            <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Bank Account No.</td>
+            <td style="padding:8px 12px">${formData.bankAccountNo || '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Bank IFSC Code</td>
+            <td style="padding:8px 12px">${formData.bankIfsc || '—'}</td>
+          </tr>
+          <tr style="background:#f0f7f0">
+            <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Bank Name</td>
+            <td style="padding:8px 12px">${formData.bankName || '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">State</td>
+            <td style="padding:8px 12px">${formData.state || '—'}</td>
+          </tr>
+          <tr style="background:#f0f7f0">
+            <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">District</td>
+            <td style="padding:8px 12px">${formData.district || '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Block</td>
+            <td style="padding:8px 12px">${formData.block || '—'}</td>
+          </tr>
+          <tr style="background:#f0f7f0">
+            <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Pincode</td>
+            <td style="padding:8px 12px">${formData.pincode || '—'}</td>
+          </tr>
+          <tr>
             <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Aadhar (masked)</td>
             <td style="padding:8px 12px">${maskAadhar(formData.aadhar)}</td>
           </tr>
-          <tr>
+          <tr style="background:#f0f7f0">
             <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a">Status</td>
             <td style="padding:8px 12px;color:#856404;font-weight:bold">⏳ Under Review</td>
           </tr>
@@ -620,6 +643,7 @@ async function sendEmails(formData, paymentInfo, pdfBase64, filename, driveLink,
 
   // ── Admin email ──
   if (adminEmail) {
+    // Admin ko unmasked Aadhar dikhate hain
     const adminHtml = htmlBody
       .replace(maskAadhar(formData.aadhar), String(formData.aadhar || ''))
     await transporter.sendMail({
@@ -669,6 +693,7 @@ export default async function handler(req, res) {
       photo:            base64ToFileObj(uploadedFiles?.photo),
       signature:        base64ToFileObj(uploadedFiles?.signature),
       aadharDoc:        base64ToFileObj(uploadedFiles?.aadharDoc),
+      bankPassbook:     base64ToFileObj(uploadedFiles?.bankPassbook),
       tenthDoc:         base64ToFileObj(uploadedFiles?.tenthDoc),
       twelfthDoc:       base64ToFileObj(uploadedFiles?.twelfthDoc),
       qualificationDoc: base64ToFileObj(uploadedFiles?.qualificationDoc),
@@ -676,12 +701,48 @@ export default async function handler(req, res) {
       screenshot:       base64ToFileObj(uploadedFiles?.screenshot),
     }
 
-    // ── PDF generate ──
+    // ── PDF generate karo ──
     console.log('[verify-payment] Generating PDF...')
 
     const pdfFormData = {
-      ...formData,
+      // Personal details
+      name:              formData?.name              || '',
+      fatherName:        formData?.fatherName        || '',
+      motherName:        formData?.motherName        || '',
+      dob:               formData?.dob               || '',
+      gender:            formData?.gender            || '',
+      category:          formData?.category          || '',
+      nationality:       formData?.nationality       || 'Indian',
+      aadhar:            formData?.aadhar            || '',
+      qualification:     formData?.qualification     || '',
+
+      // Contact
+      mobile:            formData?.mobile            || '',
+      email:             formData?.email             || '',
+
+      // Address
+      state:             formData?.state             || '',
+      district:          formData?.district          || '',
+      block:             formData?.block             || '',   // ✅ NEW
+      pincode:           formData?.pincode           || '',   // ✅ NEW
+      address:           formData?.address           || '',
+
+      // Bank details ✅ NEW
+      bankAccountNo:     formData?.bankAccountNo     || '',
+      bankIfsc:          formData?.bankIfsc          || '',
+      bankName:          formData?.bankName          || '',
+
+      // Post info
+      postTitle:         formData?.postTitle         || '',
+      postLevel:         formData?.postLevel         || '',
+
+      // Education (JSON string)
+      education:         formData?.education         || '[]',
+
+      // Registration
       registrationNo,
+
+      // Payment
       paymentMethod:     paymentInfo?.paymentMethod     || 'Manual',
       utrNumber:         paymentInfo?.utrNumber         || '—',
       senderName:        paymentInfo?.senderName        || '',
@@ -707,11 +768,12 @@ export default async function handler(req, res) {
     console.log('[verify-payment] PDF generated ✅ | size:', pdfBytes.length, 'bytes')
 
     // ── Apps Script — sheet + Drive upload ──
-    // NOTE: screenshot base64 alag bheja taaki Apps Script payload bahut bada na ho
     let driveLink = null
     try {
       const scriptResult = await submitToAppsScript({
         registrationNo,
+
+        // Personal
         name:              formData.name,
         fatherName:        formData.fatherName        || '',
         motherName:        formData.motherName        || '',
@@ -721,24 +783,44 @@ export default async function handler(req, res) {
         gender:            formData.gender            || '',
         category:          formData.category          || '',
         nationality:       formData.nationality       || 'Indian',
-        state:             formData.state             || '',
-        district:          formData.district          || '',
-        address:           formData.address           || '',
         qualification:     formData.qualification     || '',
         aadhar:            formData.aadhar            || '',
+
+        // Address ✅ NEW fields included
+        state:             formData.state             || '',
+        district:          formData.district          || '',
+        block:             formData.block             || '',   // ✅
+        pincode:           formData.pincode           || '',   // ✅
+        address:           formData.address           || '',
+
+        // Bank ✅ NEW
+        bankAccountNo:     formData.bankAccountNo     || '',
+        bankIfsc:          formData.bankIfsc          || '',
+        bankName:          formData.bankName          || '',
+
+        // Post
         postTitle:         formData.postTitle         || '',
         postLevel:         formData.postLevel         || '',
+
+        // Payment
         paymentMethod:     paymentInfo?.paymentMethod || 'Manual',
-        transactionId:     paymentInfo?.utrNumber     || '',   // ✅ UTR = transactionId
+        transactionId:     paymentInfo?.utrNumber     || '',
         senderName:        paymentInfo?.senderName        || '',
         senderUpiId:       paymentInfo?.senderUpiId       || '',
         accountHolderName: paymentInfo?.accountHolderName || '',
         lastFourDigits:    paymentInfo?.lastFourDigits    || '',
-        paymentDate:       paymentInfo?.paymentDate       || '',  // ✅ actual date
-        paymentTime:       paymentInfo?.paymentTime       || '',  // ✅ actual time
+        paymentDate:       paymentInfo?.paymentDate       || '',
+        paymentTime:       paymentInfo?.paymentTime       || '',
+
+        // Education
         education:         formData.education         || '[]',
-        hasScreenshot:     !!uploadedFiles?.screenshot,           // ✅ flag only, not base64
-        pdfBase64,                                                // ✅ PDF Drive upload ke liye
+
+        // File flags ✅
+        hasScreenshot:     !!uploadedFiles?.screenshot,
+        hasBankPassbook:   !!uploadedFiles?.bankPassbook,   // ✅
+
+        // PDF
+        pdfBase64,
       })
       driveLink = scriptResult?.driveLink || null
       console.log('[verify-payment] Apps Script ✅ | driveLink:', driveLink)
@@ -746,15 +828,22 @@ export default async function handler(req, res) {
       console.error('[verify-payment] Apps Script FAILED (non-fatal):', err.message)
     }
 
-    // ── Email bhejo (Brevo) ──
-    try {
-      await sendEmails(formData, paymentInfo || {}, pdfBase64, filename, driveLink, registrationNo)
-      console.log('[verify-payment] Emails sent ✅')
-    } catch (err) {
-      console.error('[verify-payment] Email FAILED (non-fatal):', err.message)
-    }
+    // ════════════════════════════════════════════════════════════════════════
+    // ── EMAIL SECTION ────────────────────────────────────────────────────────
+    // ── EMAIL BAND KARNA HO TO: neeche wala poora try-catch block COMMENT OUT karo ──
+    // ── EMAIL CHALU KARNA HO TO: comment hatao ───────────────────────────────
+    // ════════════════════════════════════════════════════════════════════════
 
-    // ── Success ──
+    // try {
+    //   await sendEmails(formData, paymentInfo || {}, pdfBase64, filename, driveLink, registrationNo)
+    //   console.log('[verify-payment] Emails sent ✅')
+    // } catch (err) {
+    //   console.error('[verify-payment] Email FAILED (non-fatal):', err.message)
+    // }
+
+    // ── EMAIL SECTION END ────────────────────────────────────────────────────
+
+    // ── Success response ──
     return res.status(200).json({
       success: true,
       pdfBase64,
