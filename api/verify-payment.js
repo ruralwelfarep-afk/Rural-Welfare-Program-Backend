@@ -389,7 +389,7 @@
 
 
 
-// api/verify-payment.js — with detailed stage-by-stage logging
+
 
 import nodemailer from 'nodemailer'
 import { generateApplicationPDF } from './utils/generatePDF.js'
