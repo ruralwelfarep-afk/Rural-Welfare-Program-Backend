@@ -729,15 +729,22 @@ export default async function handler(req, res) {
     const filename  = `Application_${safeName}_${registrationNo}.pdf`
 
     // ── STAGE 7: Send response ─────────────────────────────────────────────
-    log('handler', 'Sending 200 response', { registrationNo, filename })
-    res.status(200).json({ success: true, pdfBase64, filename, driveLink: null, registrationNo })
+    // log('handler', 'Sending 200 response', { registrationNo, filename })
+    // res.status(200).json({ success: true, pdfBase64, filename, driveLink: null, registrationNo })
+
+    log('handler', 'Sending email (awaited before response)...')
+    await sendEmailsInBackground(formData, paymentInfo || {}, pdfBase64, filename, registrationNo)
+    log('handler', 'Email done')
 
     // ── STAGE 8: Background tasks ──────────────────────────────────────────
-    log('handler', 'Starting background tasks...')
-    uploadPDFInBackground(pdfBase64, registrationNo, formData.name)
-      .catch(err => logError('drive-bg', 'Unhandled rejection', err))
-    sendEmailsInBackground(formData, paymentInfo || {}, pdfBase64, filename, registrationNo)
-      .catch(err => logError('email-bg', 'Unhandled rejection', err))
+    // log('handler', 'Starting background tasks...')
+    // uploadPDFInBackground(pdfBase64, registrationNo, formData.name)
+    //   .catch(err => logError('drive-bg', 'Unhandled rejection', err))
+    // sendEmailsInBackground(formData, paymentInfo || {}, pdfBase64, filename, registrationNo)
+    //   .catch(err => logError('email-bg', 'Unhandled rejection', err))
+
+    log('handler', 'Sending 200 response', { registrationNo, filename })
+    return res.status(200).json({ success: true, pdfBase64, filename, driveLink: null, registrationNo })
 
   } catch (error) {
     logError('handler', 'Unexpected top-level error', error)
