@@ -224,9 +224,9 @@ export default async function handler(req, res) {
     if (!formData?.name || !formData?.email) {
       return res.status(400).json({ error: 'Missing required fields: name aur email zaroori hain' })
     }
-    if (!paymentInfo?.utrNumber) {
-      return res.status(400).json({ error: 'Missing UTR / Transaction ID' })
-    }
+    // if (!paymentInfo?.utrNumber) {
+    //   return res.status(400).json({ error: 'Missing UTR / Transaction ID' })
+    // }
 
     console.log('[verify-payment] Validated | name:', formData.name)
 
