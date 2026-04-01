@@ -389,16 +389,10 @@
 
 
 
-// api/verify-payment.js
-// ✅ OPTIMIZED:
-//   - Drive upload → fire-and-forget (saves ~4s)
-//   - Email       → fire-and-forget (saves ~2s)
-//   - Logo PNG buffer cached at module level (saves ~0.5s per request)
-//   - Response sent immediately after PDF generation
-//   - All non-critical work runs in background
+// api/verify-payment.js — with detailed stage-by-stage logging
 
-import nodemailer                  from 'nodemailer'
-import { generateApplicationPDF }  from './utils/generatePDF.js'
+import nodemailer from 'nodemailer'
+import { generateApplicationPDF } from './utils/generatePDF.js'
 
 export const config = {
   api: {
@@ -407,20 +401,35 @@ export const config = {
   },
 }
 
-// ── Brevo SMTP Transporter ────────────────────────────────────────────────────
+// ── Structured logger ─────────────────────────────────────────────────────────
+function log(stage, msg, data = null) {
+  const entry = {
+    ts:    new Date().toISOString(),
+    stage,
+    msg,
+    ...(data !== null ? { data } : {}),
+  }
+  console.log(JSON.stringify(entry))
+}
+
+function logError(stage, msg, err) {
+  console.error(JSON.stringify({
+    ts:      new Date().toISOString(),
+    stage,
+    msg,
+    error:   err?.message || String(err),
+    stack:   err?.stack?.split('\n').slice(0, 6).join(' | ') || null,
+  }))
+}
+
+// ── helpers (unchanged) ───────────────────────────────────────────────────────
 function createTransporter() {
   return nodemailer.createTransport({
-    host:   'smtp-relay.brevo.com',
-    port:   587,
-    secure: false,
-    auth: {
-      user: process.env.BREVO_SMTP_USER,
-      pass: process.env.BREVO_SMTP_KEY,
-    },
+    host: 'smtp-relay.brevo.com', port: 587, secure: false,
+    auth: { user: process.env.BREVO_SMTP_USER, pass: process.env.BREVO_SMTP_KEY },
   })
 }
 
-// ── base64 → Buffer ───────────────────────────────────────────────────────────
 function base64ToFileObj(fileObj) {
   if (!fileObj?.base64) return null
   try {
@@ -430,76 +439,84 @@ function base64ToFileObj(fileObj) {
       originalName: fileObj.originalName || 'file',
     }
   } catch (e) {
-    console.warn('[base64ToFileObj] failed:', e.message)
+    logError('base64ToFileObj', 'Conversion failed', e)
     return null
   }
 }
 
-// ── Apps Script call ──────────────────────────────────────────────────────────
+function maskAadhar(aadhar) {
+  return aadhar ? 'XXXX-XXXX-' + String(aadhar).slice(-4) : '—'
+}
+
+// ── Apps Script ───────────────────────────────────────────────────────────────
 async function submitToAppsScript(payload) {
   const url = process.env.APPS_SCRIPT_URL || process.env.VITE_APPS_SCRIPT_URL
   if (!url) {
-    console.warn('[apps-script] URL not set — skipping')
+    log('apps-script', 'URL not set — skipping', { envKeys: Object.keys(process.env).filter(k => k.includes('SCRIPT')) })
     return { success: false, driveLink: null, registrationNo: null }
   }
+
+  log('apps-script', 'Calling Apps Script', { url: url.slice(0, 60) + '...' })
+
   try {
     const res  = await fetch(url, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ action: 'submit', ...payload }),
     })
+
+    log('apps-script', 'Response received', { status: res.status, ok: res.ok })
+
     const text = await res.text()
+    log('apps-script', 'Raw response', { preview: text.slice(0, 200) })
+
     let json
-    try { json = JSON.parse(text) } catch { return { driveLink: null, registrationNo: null } }
-    if (!json.success) console.error('[apps-script] Failed:', json.error)
+    try { json = JSON.parse(text) }
+    catch (parseErr) {
+      logError('apps-script', 'JSON parse failed', parseErr)
+      return { driveLink: null, registrationNo: null }
+    }
+
+    if (!json.success) {
+      log('apps-script', 'Script returned failure', { error: json.error })
+    } else {
+      log('apps-script', 'Success', { registrationNo: json.registrationNo })
+    }
+
     return json
   } catch (err) {
-    console.error('[apps-script] Error:', err.message)
+    logError('apps-script', 'Fetch threw', err)
     return { driveLink: null, registrationNo: null }
   }
 }
 
-// ✅ ASYNC: Drive upload — runs in background, does NOT block response
+// ── Background tasks (fire-and-forget, unchanged) ────────────────────────────
 async function uploadPDFInBackground(pdfBase64, registrationNo, name) {
   const url = process.env.APPS_SCRIPT_URL || process.env.VITE_APPS_SCRIPT_URL
   if (!url) return
-
   try {
-    const res = await fetch(url, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        action: 'uploadPDF',
-        registrationNo,
-        name,
-        pdfBase64,
-      }),
+    const res  = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body:   JSON.stringify({ action: 'uploadPDF', registrationNo, name, pdfBase64 }),
     })
     const text = await res.text()
-    let json
-    try { json = JSON.parse(text) } catch { return }
-    if (json?.driveLink) {
-      console.log('[drive-bg] Upload success:', json.driveLink)
-    } else {
-      console.error('[drive-bg] Upload failed:', json?.error)
-    }
-  } catch (err) {
-    console.error('[drive-bg] Upload error (non-fatal):', err.message)
-  }
+    let json; try { json = JSON.parse(text) } catch { return }
+    json?.driveLink
+      ? log('drive-bg', 'Upload success', { link: json.driveLink })
+      : logError('drive-bg', 'Upload failed', { error: json?.error })
+  } catch (err) { logError('drive-bg', 'Upload error (non-fatal)', err) }
 }
 
-// ── Mask Aadhar ───────────────────────────────────────────────────────────────
-function maskAadhar(aadhar) {
-  return aadhar ? 'XXXX-XXXX-' + String(aadhar).slice(-4) : '—'
-}
-
-// ✅ ASYNC: Email — runs in background, does NOT block response
 async function sendEmailsInBackground(formData, paymentInfo, pdfBase64, filename, registrationNo) {
   const fromEmail  = process.env.FROM_EMAIL
   const adminEmail = process.env.ADMIN_EMAIL
 
   if (!fromEmail || !process.env.BREVO_SMTP_USER || !process.env.BREVO_SMTP_KEY) {
-    console.warn('[email-bg] Email env vars missing — skipping')
+    log('email-bg', 'Email env vars missing — skipping', {
+      FROM_EMAIL:      !!process.env.FROM_EMAIL,
+      BREVO_SMTP_USER: !!process.env.BREVO_SMTP_USER,
+      BREVO_SMTP_KEY:  !!process.env.BREVO_SMTP_KEY,
+    })
     return
   }
 
@@ -527,21 +544,14 @@ async function sendEmailsInBackground(formData, paymentInfo, pdfBase64, filename
           </div>
           <table style="width:100%;border-collapse:collapse;font-size:14px;margin:16px 0">
             ${[
-              ['Registration No.',      registrationNo],
-              ['Post Applied',          formData.postTitle],
-              ['Payment Method',        payMethod],
-              ['UTR / Transaction ID',  utr],
-              ['Payment Date / Time',   `${payDate} at ${payTime}`],
-              ['Amount',                amountDisplay],
-              ['Bank Account No.',      formData.bankAccountNo || '—'],
-              ['Bank IFSC Code',        formData.bankIfsc      || '—'],
-              ['Bank Name',             formData.bankName      || '—'],
-              ['State',                 formData.state         || '—'],
-              ['District',              formData.district      || '—'],
-              ['Block',                 formData.block         || '—'],
-              ['Pincode',               formData.pincode       || '—'],
-              ['Aadhar (masked)',        maskAadhar(formData.aadhar)],
-              ['Status',                '⏳ Under Review'],
+              ['Registration No.',     registrationNo],
+              ['Post Applied',         formData.postTitle],
+              ['Payment Method',       payMethod],
+              ['UTR / Transaction ID', utr],
+              ['Payment Date / Time',  `${payDate} at ${payTime}`],
+              ['Amount',               amountDisplay],
+              ['Aadhar (masked)',       maskAadhar(formData.aadhar)],
+              ['Status',               '⏳ Under Review'],
             ].map(([label, value], i) => `
               <tr style="${i % 2 === 0 ? 'background:#f0f7f0' : ''}">
                 <td style="padding:8px 12px;font-weight:bold;color:#1a5c2a;width:45%">${label}</td>
@@ -550,14 +560,9 @@ async function sendEmailsInBackground(formData, paymentInfo, pdfBase64, filename
             `).join('')}
           </table>
           <p>Application PDF is attached to this email.</p>
-          <p style="color:#888;font-size:12px;margin-top:24px">
-            Rural Welfare Program — Healthy Villages, Empowered Women, Prosperous India
-          </p>
         </div>
-      </div>
-    `
+      </div>`
 
-    // Applicant email
     await transporter.sendMail({
       from:        `"Rural Welfare Program" <${fromEmail}>`,
       to:          formData.email,
@@ -565,9 +570,8 @@ async function sendEmailsInBackground(formData, paymentInfo, pdfBase64, filename
       html:        htmlBody,
       attachments: [{ filename, content: pdfBuffer, contentType: 'application/pdf' }],
     })
-    console.log('[email-bg] Applicant email sent to:', formData.email)
+    log('email-bg', 'Applicant email sent', { to: formData.email })
 
-    // Admin email (Aadhar unmasked)
     if (adminEmail) {
       const adminHtml = htmlBody.replace(maskAadhar(formData.aadhar), String(formData.aadhar || ''))
       await transporter.sendMail({
@@ -577,11 +581,9 @@ async function sendEmailsInBackground(formData, paymentInfo, pdfBase64, filename
         html:        adminHtml,
         attachments: [{ filename, content: pdfBuffer, contentType: 'application/pdf' }],
       })
-      console.log('[email-bg] Admin email sent to:', adminEmail)
+      log('email-bg', 'Admin email sent', { to: adminEmail })
     }
-  } catch (err) {
-    console.error('[email-bg] Email failed (non-fatal):', err.message)
-  }
+  } catch (err) { logError('email-bg', 'Email failed (non-fatal)', err) }
 }
 
 // ── MAIN HANDLER ──────────────────────────────────────────────────────────────
@@ -593,123 +595,152 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST')   return res.status(405).json({ error: 'Method not allowed' })
 
-  console.log('[verify-payment] Request received')
+  log('handler', 'Request received', { method: req.method, contentLength: req.headers['content-length'] })
+
+  // ── STAGE 1: Env check ────────────────────────────────────────────────────
+  const envStatus = {
+    APPS_SCRIPT_URL: !!(process.env.APPS_SCRIPT_URL || process.env.VITE_APPS_SCRIPT_URL),
+    BREVO_SMTP_USER: !!process.env.BREVO_SMTP_USER,
+    BREVO_SMTP_KEY:  !!process.env.BREVO_SMTP_KEY,
+    FROM_EMAIL:      !!process.env.FROM_EMAIL,
+    ADMIN_EMAIL:     !!process.env.ADMIN_EMAIL,
+    ALLOWED_ORIGIN:  !!process.env.ALLOWED_ORIGIN,
+  }
+  log('handler', 'Env check', envStatus)
 
   try {
-    const { formData, paymentInfo, uploadedFiles } = req.body
+    // ── STAGE 2: Parse body ────────────────────────────────────────────────
+    log('handler', 'Parsing request body...')
+    const body = req.body
 
-    // ── Validation ──
+    if (!body) {
+      logError('handler', 'Body is null/undefined', null)
+      return res.status(400).json({ error: 'Request body empty hai' })
+    }
+
+    const { formData, paymentInfo, uploadedFiles } = body
+
+    log('handler', 'Body parsed', {
+      hasFormData:     !!formData,
+      hasPaymentInfo:  !!paymentInfo,
+      hasUploadedFiles: !!uploadedFiles,
+      fileKeys:        uploadedFiles ? Object.keys(uploadedFiles).filter(k => !!uploadedFiles[k]) : [],
+      approxPayloadKB: Math.round(JSON.stringify(body).length / 1024),
+    })
+
+    // ── STAGE 3: Validation ────────────────────────────────────────────────
     if (!formData?.name || !formData?.email) {
+      log('handler', 'Validation failed', { name: !!formData?.name, email: !!formData?.email })
       return res.status(400).json({ error: 'Missing required fields: name aur email zaroori hain' })
     }
 
-    console.log('[verify-payment] Validated | name:', formData.name)
+    log('handler', 'Validation passed', { name: formData.name, email: formData.email })
 
-    // ── Convert base64 files to buffers ──
+    // ── STAGE 4: base64 → buffer ───────────────────────────────────────────
+    log('handler', 'Converting base64 files to buffers...')
     const filesForPDF = {
-      photo:           base64ToFileObj(uploadedFiles?.photo),
-      signature:       base64ToFileObj(uploadedFiles?.signature),
-      aadharDoc:       base64ToFileObj(uploadedFiles?.aadharDoc),
-      bankPassbook:    base64ToFileObj(uploadedFiles?.bankPassbook),
-      tenthDoc:        base64ToFileObj(uploadedFiles?.tenthDoc),
-      twelfthDoc:      base64ToFileObj(uploadedFiles?.twelfthDoc),
-      qualificationDoc:base64ToFileObj(uploadedFiles?.qualificationDoc),
-      additionalDoc:   base64ToFileObj(uploadedFiles?.additionalDoc),
-      screenshot:      base64ToFileObj(uploadedFiles?.screenshot),
+      photo:            base64ToFileObj(uploadedFiles?.photo),
+      signature:        base64ToFileObj(uploadedFiles?.signature),
+      aadharDoc:        base64ToFileObj(uploadedFiles?.aadharDoc),
+      bankPassbook:     base64ToFileObj(uploadedFiles?.bankPassbook),
+      tenthDoc:         base64ToFileObj(uploadedFiles?.tenthDoc),
+      twelfthDoc:       base64ToFileObj(uploadedFiles?.twelfthDoc),
+      qualificationDoc: base64ToFileObj(uploadedFiles?.qualificationDoc),
+      additionalDoc:    base64ToFileObj(uploadedFiles?.additionalDoc),
+      screenshot:       base64ToFileObj(uploadedFiles?.screenshot),
     }
-
-    // ── Apps Script: get registrationNo (this is blocking — we need it for PDF) ──
-    console.log('[verify-payment] Calling Apps Script for registrationNo...')
-    const scriptResult = await submitToAppsScript({
-      name:              formData.name,
-      fatherName:        formData.fatherName        || '',
-      motherName:        formData.motherName        || '',
-      dob:               formData.dob               || '',
-      mobile:            formData.mobile            || '',
-      email:             formData.email,
-      gender:            formData.gender            || '',
-      category:          formData.category          || '',
-      nationality:       formData.nationality       || 'Indian',
-      qualification:     formData.qualification     || '',
-      aadhar:            formData.aadhar            || '',
-      state:             formData.state             || '',
-      district:          formData.district          || '',
-      block:             formData.block             || '',
-      pincode:           formData.pincode           || '',
-      address:           formData.address           || '',
-      bankAccountNo:     formData.bankAccountNo     || '',
-      bankIfsc:          formData.bankIfsc          || '',
-      bankName:          formData.bankName          || '',
-      postTitle:         formData.postTitle         || '',
-      postLevel:         formData.postLevel         || '',
-      paymentMethod:     paymentInfo?.paymentMethod || 'UPI',
-      transactionId:     paymentInfo?.utrNumber     || '',
-      senderName:        paymentInfo?.senderName    || '',
-      senderUpiId:       paymentInfo?.senderUpiId   || '',
-      paymentDate:       paymentInfo?.paymentDate   || '',
-      paymentTime:       paymentInfo?.paymentTime   || '',
-      education:         formData.education         || '[]',
-      hasScreenshot:     !!uploadedFiles?.screenshot,
-      hasBankPassbook:   !!uploadedFiles?.bankPassbook,
+    log('handler', 'Files converted', {
+      convertedKeys: Object.keys(filesForPDF).filter(k => !!filesForPDF[k]),
     })
+
+    // ── STAGE 5: Apps Script ───────────────────────────────────────────────
+    log('handler', 'Calling Apps Script for registrationNo...')
+    let scriptResult
+    try {
+      scriptResult = await submitToAppsScript({
+        name:          formData.name,
+        fatherName:    formData.fatherName    || '',
+        motherName:    formData.motherName    || '',
+        dob:           formData.dob           || '',
+        mobile:        formData.mobile        || '',
+        email:         formData.email,
+        gender:        formData.gender        || '',
+        category:      formData.category      || '',
+        nationality:   formData.nationality   || 'Indian',
+        qualification: formData.qualification || '',
+        aadhar:        formData.aadhar        || '',
+        state:         formData.state         || '',
+        district:      formData.district      || '',
+        block:         formData.block         || '',
+        pincode:       formData.pincode       || '',
+        address:       formData.address       || '',
+        bankAccountNo: formData.bankAccountNo || '',
+        bankIfsc:      formData.bankIfsc      || '',
+        bankName:      formData.bankName      || '',
+        postTitle:     formData.postTitle     || '',
+        postLevel:     formData.postLevel     || '',
+        paymentMethod: paymentInfo?.paymentMethod || 'UPI',
+        transactionId: paymentInfo?.utrNumber     || '',
+        senderName:    paymentInfo?.senderName    || '',
+        senderUpiId:   paymentInfo?.senderUpiId   || '',
+        paymentDate:   paymentInfo?.paymentDate   || '',
+        paymentTime:   paymentInfo?.paymentTime   || '',
+        education:     formData.education         || '[]',
+        hasScreenshot: !!uploadedFiles?.screenshot,
+        hasBankPassbook: !!uploadedFiles?.bankPassbook,
+      })
+    } catch (scriptErr) {
+      logError('handler', 'submitToAppsScript threw unexpectedly', scriptErr)
+      return res.status(500).json({ error: 'Apps Script call failed. Please try again.' })
+    }
 
     const registrationNo = scriptResult?.registrationNo
     if (!registrationNo) {
-      console.error('[verify-payment] registrationNo missing from Apps Script')
+      log('handler', 'registrationNo missing', { scriptResult })
       return res.status(500).json({ error: 'Registration number generate nahi hua. Please try again.' })
     }
-    console.log('[verify-payment] RegNo:', registrationNo)
+    log('handler', 'Got registrationNo', { registrationNo })
 
-    // ── Generate PDF ──
-    console.log('[verify-payment] Generating PDF...')
+    // ── STAGE 6: PDF generation ────────────────────────────────────────────
+    log('handler', 'Starting PDF generation...')
     const pdfFormData = {
       ...formData,
       registrationNo,
-      paymentMethod:     paymentInfo?.paymentMethod  || 'UPI',
-      utrNumber:         paymentInfo?.utrNumber      || '—',
-      senderName:        paymentInfo?.senderName     || '',
-      senderUpiId:       paymentInfo?.senderUpiId    || '',
-      paymentStatus:     'Under Review',
-      paymentDate:       paymentInfo?.paymentDate    || '',
-      paymentTime:       paymentInfo?.paymentTime    || '',
+      paymentMethod: paymentInfo?.paymentMethod  || 'UPI',
+      utrNumber:     paymentInfo?.utrNumber      || '—',
+      senderName:    paymentInfo?.senderName     || '',
+      senderUpiId:   paymentInfo?.senderUpiId    || '',
+      paymentStatus: 'Under Review',
+      paymentDate:   paymentInfo?.paymentDate    || '',
+      paymentTime:   paymentInfo?.paymentTime    || '',
     }
 
     let pdfBytes
     try {
       pdfBytes = await generateApplicationPDF(pdfFormData, registrationNo, filesForPDF)
-    } catch (err) {
-      console.error('[verify-payment] PDF generation failed:', err)
-      return res.status(500).json({ error: 'PDF generation failed: ' + err.message })
+      log('handler', 'PDF generated', { sizeBytes: pdfBytes.length })
+    } catch (pdfErr) {
+      logError('handler', 'PDF generation failed', pdfErr)
+      return res.status(500).json({ error: 'PDF generation failed: ' + pdfErr.message })
     }
 
     const pdfBase64 = Buffer.from(pdfBytes).toString('base64')
     const safeName  = (formData.name || 'applicant').replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 30)
     const filename  = `Application_${safeName}_${registrationNo}.pdf`
-    console.log('[verify-payment] PDF generated ✅ | size:', pdfBytes.length, 'bytes')
 
-    // ✅ Send response IMMEDIATELY — user gets result fast
-    res.status(200).json({
-      success:        true,
-      pdfBase64,
-      filename,
-      driveLink:      null,   // will be uploaded in background
-      registrationNo,
-    })
+    // ── STAGE 7: Send response ─────────────────────────────────────────────
+    log('handler', 'Sending 200 response', { registrationNo, filename })
+    res.status(200).json({ success: true, pdfBase64, filename, driveLink: null, registrationNo })
 
-    // ✅ BACKGROUND WORK — starts AFTER response is sent, user never waits
-    console.log('[verify-payment] Background tasks starting...')
-
-    // Drive upload (fire and forget)
+    // ── STAGE 8: Background tasks ──────────────────────────────────────────
+    log('handler', 'Starting background tasks...')
     uploadPDFInBackground(pdfBase64, registrationNo, formData.name)
-      .catch(err => console.error('[drive-bg] Unhandled:', err.message))
-
-    // Email (fire and forget)
+      .catch(err => logError('drive-bg', 'Unhandled rejection', err))
     sendEmailsInBackground(formData, paymentInfo || {}, pdfBase64, filename, registrationNo)
-      .catch(err => console.error('[email-bg] Unhandled:', err.message))
+      .catch(err => logError('email-bg', 'Unhandled rejection', err))
 
   } catch (error) {
-    console.error('[verify-payment] Unexpected error:', error)
-    // Only send error response if headers not already sent
+    logError('handler', 'Unexpected top-level error', error)
     if (!res.headersSent) {
       return res.status(500).json({ error: 'Server error. Please try again.' })
     }
